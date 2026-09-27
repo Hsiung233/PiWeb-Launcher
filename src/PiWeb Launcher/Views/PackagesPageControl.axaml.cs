@@ -610,19 +610,28 @@ namespace PiWeb_Launcher.Views
                 this._operationLog.Append(line).Append("\r\n");
             }
 
-            // 浮窗关着时用小圆点提示有新输出(开着时用户自己看得到,不必提示)
-            if (!this.OperationLogFlyout.IsVisible)
+            // ⚠ 本回调来自子进程输出线程(StreamAsync 的 OutputDataReceived)。
+            // IsVisible 这类 Avalonia 属性只能在 UI 线程读写,在回调线程上读
+            // Flyout.IsVisible 会抛 InvalidOperationException 并直接带崩整个进程
+            // (crash dump 证实:Packages_OperationOutput → Visual.get_IsVisible → VerifyAccess)。
+            void NotifyUi()
             {
-                Dispatcher.UIThread.Post(() => this.OperationLogUnreadDot.IsVisible = true);
+                // 浮窗关着时用小圆点提示有新输出(开着时用户自己看得到,不必提示)
+                if (!this.OperationLogFlyout.IsVisible)
+                {
+                    this.OperationLogUnreadDot.IsVisible = true;
+                }
+
+                this._operationThrottle.Schedule();
             }
 
             if (Dispatcher.UIThread.CheckAccess())
             {
-                this._operationThrottle.Schedule();
+                NotifyUi();
             }
             else
             {
-                Dispatcher.UIThread.Post(this._operationThrottle.Schedule);
+                Dispatcher.UIThread.Post(NotifyUi);
             }
         }
 
