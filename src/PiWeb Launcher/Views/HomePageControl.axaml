@@ -1,0 +1,309 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="using:FluentAvalonia.UI.Controls"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="500"
+             x:Class="PiWeb_Launcher.Views.HomePageControl">
+
+    <!-- 日志区底色 CodeAreaFillBrush 与卡片外观(Border.card)统一定义在 App.axaml -->
+
+    <!-- 结构:顶部标题/状态区(固定,不随内容滚动) + 下方三段卡片(地址/环境/日志)可滚动。
+         内容可能超出可视高度(窗口小或日志较高),故用滚动容器包住,避免底部被裁掉 -->
+    <Grid RowDefinitions="Auto,Auto,*">
+
+        <!-- ① 标题与状态:左侧产品名 + 状态徒标 + 版本号,右侧操作按钮(按状态三组互斥显示) -->
+        <Grid Grid.Row="0"
+              ColumnDefinitions="*,Auto"
+              ColumnSpacing="16"
+              Margin="24 20 24 0">
+            <StackPanel Grid.Column="0"
+                        VerticalAlignment="Center"
+                        Spacing="2">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock x:Name="StatusText"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center"
+                               Text="@agegr/pi-web"/>
+
+                    <!-- 状态徒标:已安装且非安装中时显示,绿点=运行中 / 灰点=已停止 -->
+                    <Border x:Name="StatusBadge"
+                            IsVisible="False"
+                            VerticalAlignment="Center"
+                            CornerRadius="10"
+                            Padding="8 2"
+                            Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                            <Ellipse x:Name="RunningDot"
+                                     Width="8" Height="8"
+                                     VerticalAlignment="Center"
+                                     Fill="{DynamicResource SystemFillColorSuccessBrush}"/>
+                            <Ellipse x:Name="StoppedDot"
+                                     Width="8" Height="8"
+                                     IsVisible="False"
+                                     VerticalAlignment="Center"
+                                     Fill="{DynamicResource SystemFillColorNeutralBrush}"/>
+                            <TextBlock x:Name="StatusBadgeText"
+                                       FontSize="12"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <TextBlock x:Name="StatusSubText"
+                           FontSize="12"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Text="检查中..."/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        VerticalAlignment="Center">
+                <ui:FAProgressRing x:Name="HeaderProgress"
+                                   Width="20"
+                                   Height="20"
+                                   IsActive="False"/>
+
+                <!-- 未安装:安装 -->
+                <StackPanel x:Name="InstallActionsPanel"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            VerticalAlignment="Center">
+                    <Button x:Name="InstallButton"
+                            Classes="accent"
+                            Click="OnInstallClick"
+                            ToolTip.Tip="npm install -g @agegr/pi-web">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE896;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="InstallButtonText" Text="安装" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+
+                <!-- 已安装未运行:运行 -->
+                <StackPanel x:Name="RunActionsPanel"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            VerticalAlignment="Center">
+                    <!-- 检测到新版本时才显示 -->
+                    <Button x:Name="UpdateButton"
+                            Classes="accent"
+                            IsVisible="False"
+                            Click="OnUpdateClick">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE895;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock Text="更新" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <TextBlock Text="监听"
+                               VerticalAlignment="Center"
+                               Opacity="0.8"/>
+                    <!-- 监听地址:留空 = pi-web 默认 127.0.0.1。
+                         填非回环地址等于把一个能读写本机文件的 Agent 暴露到网络上,提示里必须说清楚 -->
+                    <TextBox x:Name="HostnameBox"
+                             Width="128"
+                             VerticalAlignment="Center"
+                             PlaceholderText="127.0.0.1"
+                             LostFocus="OnHostnameCommit"
+                             KeyDown="OnHostnameKeyDown"
+                             ToolTip.Tip="留空则使用 pi-web 默认的 127.0.0.1。填 0.0.0.0 会把服务暴露到局域网 —— 请同时在设置页配置 Web 登录密码"/>
+                    <TextBlock Text="端口"
+                               VerticalAlignment="Center"
+                               Opacity="0.8"/>
+                    <!-- 端口不做“旋转”:按钮无用,且滚轮/方向键会误改端口,故 ShowButtonSpinner 与 AllowSpin 一并关闭 -->
+                    <NumericUpDown x:Name="PortBox"
+                                   Width="90"
+                                   VerticalAlignment="Center"
+                                   Minimum="1"
+                                   Maximum="65535"
+                                   Increment="1"
+                                   ClipValueToMinMax="True"
+                                   ParsingNumberStyle="None"
+                                   PlaceholderText="30141"
+                                   ShowButtonSpinner="False"
+                                   AllowSpin="False"
+                                   ValueChanged="OnPortValueChanged"
+                                   ToolTip.Tip="1-65535;留空则使用 pi-web 默认端口 30141"/>
+                    <Button x:Name="RunButton"
+                            Classes="accent"
+                            Click="OnRunClick">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE768;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock Text="运行" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+
+                <!-- 运行中:打开 / 重启 / 停止 -->
+                <StackPanel x:Name="RunningActionsPanel"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            VerticalAlignment="Center">
+                    <Button x:Name="OpenInWebViewButton"
+                            IsVisible="False"
+                            Click="OnOpenInWebViewClick"
+                            ToolTip.Tip="在应用内 WebView 窗口中打开 Web 端">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE774;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock Text="应用内打开" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="OpenInBrowserButton"
+                            IsVisible="False"
+                            Click="OnOpenInBrowserClick"
+                            ToolTip.Tip="在系统默认浏览器中打开 Web 端">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8A7;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock Text="浏览器打开" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <!-- 复制完整地址(pi-web 没有 token,地址由监听地址与端口唯一决定) -->
+                    <Button x:Name="CopyWebUrlButton"
+                            IsVisible="False"
+                            Click="OnCopyWebUrlClick"
+                            ToolTip.Tip="复制完整 Web 地址">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8C8;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CopyWebUrlButtonText" Text="复制URL" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="RestartButton"
+                            Click="OnRestartClick"
+                            ToolTip.Tip="停止并重新启动 Pi Web 服务">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE72C;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock Text="重启" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="StopButton"
+                            Click="OnStopClick"
+                            Background="#C42B1C"
+                            Foreground="White"
+                            ToolTip.Tip="停止 Pi Web 服务">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xF8AE;" FontSize="14" VerticalAlignment="Center"/>
+                            <TextBlock Text="停止" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+
+        <!-- ②③ 地址/环境卡片:按内容高度;内容过多(窄窗口下环境信息换行变高)时在 340 内滚动 -->
+        <ScrollViewer x:Name="ContentScroll"
+                      Grid.Row="1"
+                      MaxHeight="340"
+                      Margin="24 16 24 0"
+                      HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <!-- ③ 环境与详情:可折叠(默认折叠,把竖向空间让给日志;排查时再展开)。
+                     Node/npm/pi 路径需起子进程查询(约 1 秒),进页面时后台加载,与是否展开无关 -->
+                <Expander x:Name="EnvExpander"
+                          IsExpanded="False"
+                          HorizontalAlignment="Stretch"
+                          HorizontalContentAlignment="Stretch"
+                          Classes="card"
+                          Margin="0 0 0 12">
+                    <Expander.Header>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                            <TextBlock Text="环境与详情"
+                                       FontSize="14"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1"
+                                        Orientation="Horizontal"
+                                        Spacing="8"
+                                        VerticalAlignment="Center">
+                                <ui:FAProgressRing x:Name="EnvProgress"
+                                                   Width="20"
+                                                   Height="20"
+                                                   IsActive="False"/>
+                                <Button x:Name="CopyEnvButton"
+                                        Click="OnCopyEnvClick"
+                                        ToolTip.Tip="复制全部信息(便于反馈问题)">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8C8;" FontSize="14" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="CopyEnvButtonText" Text="复制" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Expander.Header>
+                    <SelectableTextBlock x:Name="EnvTextBlock"
+                                         Margin="0 8 0 0"
+                                         TextWrapping="Wrap"
+                                         FontFamily="Consolas"
+                                         FontSize="12"
+                                         LineHeight="20"
+                                         Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                </Expander>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- ④ 标准输出:占满剩余高度。
+             之所以不能放进上面的 ScrollViewer:滚动容器用无限高度测量内容,
+             Grid 的 * 行会退化成内容高度,日志就填不满剩余空间(之前下方大片空白即由此而来) -->
+        <Border Grid.Row="2"
+                Classes="card"
+                Margin="24 12 24 20">
+            <Grid RowDefinitions="Auto,*">
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0 0 0 10">
+                    <TextBlock Text="标准输出"
+                               FontSize="14"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="8"
+                                VerticalAlignment="Center">
+                        <Button x:Name="CopyLogButton"
+                                Click="OnCopyLogClick"
+                                ToolTip.Tip="复制面板中的全部日志">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8C8;" FontSize="14" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="CopyLogButtonText" Text="复制" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="ClearLogButton"
+                                Click="OnClearLogClick"
+                                ToolTip.Tip="清空日志面板(不影响 app.log 文件)">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE74D;" FontSize="14" VerticalAlignment="Center"/>
+                                <TextBlock Text="清空" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="OpenLogFileButton"
+                                Click="OnOpenLogFileClick"
+                                ToolTip.Tip="用资源管理器定位 app.log(还含面板里没有的设置加载、版本检查、WebView 生命周期等记录)">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8B7;" FontSize="14" VerticalAlignment="Center"/>
+                                <TextBlock Text="日志文件" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+
+                <!-- 日志正文放在内凹面板里,与卡片背景区分开;高度由上面 Grid 的 * 行撑满 -->
+                <Border Grid.Row="1"
+                        Background="{DynamicResource CodeAreaFillBrush}"
+                        CornerRadius="4"
+                        Padding="10">
+                    <ScrollViewer x:Name="LogScroll"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <SelectableTextBlock x:Name="LogTextBlock"
+                                             TextWrapping="Wrap"
+                                             FontFamily="Consolas"
+                                             FontSize="12"
+                                             LineHeight="18"
+                                             Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

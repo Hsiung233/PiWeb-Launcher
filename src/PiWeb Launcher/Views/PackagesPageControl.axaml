@@ -1,0 +1,474 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="using:FluentAvalonia.UI.Controls"
+             xmlns:models="using:PiWeb_Launcher.Models"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="1280" d:DesignHeight="720"
+             x:Class="PiWeb_Launcher.Views.PackagesPageControl">
+
+    <!-- 页面样式:列表行是高度重复的结构(左文字 + 右操作),统一在这里定义 -->
+    <UserControl.Styles>
+        <Style Selector="TextBlock.itemName">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+        <Style Selector="TextBlock.itemMeta">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+        <Style Selector="TextBlock.itemDesc">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="MaxLines" Value="3"/>
+        </Style>
+        <!-- 类型徽标(extension / skill / theme / prompt / package):小圆角 chip,与目录站点一致的观感 -->
+        <Style Selector="Border.chip">
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="Padding" Value="8 1"/>
+            <Setter Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style Selector="Border.chip TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+        </Style>
+        <!-- “已安装”徽标用强调色,和普通类型 chip 区分开 -->
+        <Style Selector="Border.chip.installed">
+            <Setter Property="Background" Value="{DynamicResource AccentFillColorSecondaryBrush}"/>
+        </Style>
+        <Style Selector="Border.chip.installed TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextOnAccentFillColorPrimaryBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <!-- 两行:① 提示条/筛选/统计,② 左右两栏。
+         安装输出**不在布局里** —— 它是浮窗,由筛选栏右侧的「输出」按钮开关(见下方 ③)。
+         原先它是常驻的第三个 `Auto` 行(一个 Expander),不展开时也白占四十来像素的高度。 -->
+    <Grid RowDefinitions="Auto,*" Margin="24 16 24 16" RowSpacing="12">
+
+        <!-- ① 顶部:提示条(pi 命令缺失 / 读取失败 / 未安装 pi-web 时的可操作提示) + 筛选栏 + 统计行 -->
+        <StackPanel Grid.Row="0" Spacing="10">
+            <Border x:Name="WarningBanner"
+                    IsVisible="False"
+                    CornerRadius="8"
+                    Padding="12 8"
+                    Background="{DynamicResource SystemFillColorCautionBackgroundBrush}"
+                    BorderThickness="1"
+                    BorderBrush="{DynamicResource SystemFillColorCautionBrush}">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                    <!-- 单行 + 超长省略:横幅绝不能因为一条十几行的 Node 栈把整页挤走
+                         (压成一行的处理见 PiPackageService.DescribeFailure) -->
+                    <SelectableTextBlock x:Name="WarningText"
+                                         Grid.Column="0"
+                                         TextWrapping="NoWrap"
+                                         TextTrimming="CharacterEllipsis"
+                                         VerticalAlignment="Center"
+                                         FontSize="12"/>
+                    <Button x:Name="WarningActionButton"
+                            Grid.Column="1"
+                            IsVisible="False"
+                            VerticalAlignment="Center"
+                            Click="OnWarningActionClick">
+                        <TextBlock x:Name="WarningActionText" Text="复制安装命令"/>
+                    </Button>
+                </Grid>
+            </Border>
+
+            <!-- 目录筛选栏:搜索 / 类型 / 排序(与 https://pi.dev/packages 的表单参数一一对应,
+                 所以这里的每一次变化都是重新向目录取第一页,而不是在本地过滤已加载的那几页) -->
+            <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                <TextBox x:Name="CatalogSearchBox"
+                         Grid.Column="0"
+                         VerticalAlignment="Center"
+                         PlaceholderText="在 pi.dev/packages 里搜索(名称 / 描述 / 作者)"
+                         KeyDown="OnCatalogSearchKeyDown"/>
+
+                <ComboBox x:Name="CatalogTypeCombo"
+                          Grid.Column="1"
+                          Width="140"
+                          VerticalAlignment="Center"
+                          SelectionChanged="OnCatalogTypeChanged"
+                          ToolTip.Tip="按包声明的资源类型筛选(目录站点上的“Filter by package type”)">
+                    <ComboBoxItem Content="全部类型"/>
+                    <ComboBoxItem Content="扩展 extension"/>
+                    <ComboBoxItem Content="技能 skill"/>
+                    <ComboBoxItem Content="主题 theme"/>
+                    <ComboBoxItem Content="提示词 prompt"/>
+                </ComboBox>
+
+                <ComboBox x:Name="CatalogSortCombo"
+                          Grid.Column="2"
+                          Width="150"
+                          VerticalAlignment="Center"
+                          SelectionChanged="OnCatalogSortChanged"
+                          ToolTip.Tip="排序由目录站点完成(本地只加载了其中若干页)">
+                    <ComboBoxItem Content="按下载量"/>
+                    <ComboBoxItem Content="最新发布"/>
+                    <ComboBoxItem Content="按名称"/>
+                </ComboBox>
+
+                <Button x:Name="CatalogRefreshButton"
+                        Grid.Column="3"
+                        VerticalAlignment="Center"
+                        Click="OnCatalogRefreshClick"
+                        ToolTip.Tip="重新从 pi.dev/packages 取第一页">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE72C;" FontSize="14" VerticalAlignment="Center"/>
+                        <TextBlock Text="刷新" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+
+                <ui:FAProgressRing x:Name="CatalogProgress"
+                                   Grid.Column="4"
+                                   Width="20"
+                                   Height="20"
+                                   IsActive="False"
+                                   VerticalAlignment="Center"/>
+
+                <!-- 安装输出:开/关下面的输出浮窗。放筛选栏而不是占一整行,
+                     既不遮挡列表,也不用给内容留避让边距(参考 DSH 插件页同一做法) -->
+                <Button x:Name="OperationLogToggleButton"
+                        Grid.Column="5"
+                        VerticalAlignment="Center"
+                        Click="OnOperationLogToggleClick"
+                        ToolTip.Tip="安装输出(安装 / 卸载 / 更新的实时输出)">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE9D9;" FontSize="14" VerticalAlignment="Center"/>
+                        <TextBlock Text="输出" VerticalAlignment="Center"/>
+                        <!-- 浮窗关着时,有新输出就亮一个小圆点 -->
+                        <Ellipse x:Name="OperationLogUnreadDot"
+                                 Width="8" Height="8"
+                                 IsVisible="False"
+                                 VerticalAlignment="Center"
+                                 Fill="{DynamicResource SystemFillColorAttentionBrush}"/>
+                    </StackPanel>
+                </Button>
+            </Grid>
+
+            <!-- 统计与辅助操作:已加载条数 / 目录地址 / 手动安装入口 -->
+            <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="12">
+                <TextBlock x:Name="CatalogCountText"
+                           Grid.Column="0"
+                           VerticalAlignment="Center"
+                           FontSize="12"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+
+                <TextBlock x:Name="CatalogSourceText"
+                           Grid.Column="1"
+                           VerticalAlignment="Center"
+                           FontSize="12"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+
+                <Button x:Name="OpenCatalogSiteButton"
+                        Grid.Column="2"
+                        VerticalAlignment="Center"
+                        Click="OnOpenCatalogSiteClick"
+                        ToolTip.Tip="在浏览器里打开 pi.dev/packages(目录的原始页面)">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE774;" FontSize="14" VerticalAlignment="Center"/>
+                        <TextBlock Text="打开目录站点" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+
+                <Button x:Name="ManualInstallButton"
+                        Grid.Column="3"
+                        VerticalAlignment="Center"
+                        Click="OnManualInstallClick"
+                        ToolTip.Tip="手动输入源规格安装(如 npm:pi-lens、git:github.com/a/b@v1、./本地路径)">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE710;" FontSize="14" VerticalAlignment="Center"/>
+                        <TextBlock Text="手动安装" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </StackPanel>
+
+        <!-- ② 主体:左「已安装」右「目录」。两栏独立滚动 —— 装包时目录列表不该被顶走 -->
+        <Grid Grid.Row="1" ColumnDefinitions="380,*" ColumnSpacing="12">
+
+            <!-- 已安装:pi list 的结果 + 版本/来源标注 -->
+            <Border Grid.Column="0" Classes="card" Padding="12">
+                <Grid RowDefinitions="Auto,Auto,*" RowSpacing="10">
+                    <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <TextBlock Grid.Column="0"
+                                   Text="已安装的包"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                            <ui:FAProgressRing x:Name="InstalledProgress"
+                                               Width="18"
+                                               Height="18"
+                                               IsActive="False"
+                                               VerticalAlignment="Center"/>
+                            <Button x:Name="RefreshInstalledButton"
+                                    Click="OnRefreshInstalledClick"
+                                    ToolTip.Tip="重新执行 pi list">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE72C;" FontSize="14" VerticalAlignment="Center"/>
+                                    <TextBlock Text="刷新" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+
+                    <StackPanel Grid.Row="1" Spacing="6">
+                        <TextBox x:Name="InstalledSearchBox"
+                                 PlaceholderText="筛选已安装的包"
+                                 TextChanged="OnInstalledSearchChanged"/>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBlock x:Name="InstalledCountText"
+                                       Grid.Column="0"
+                                       FontSize="12"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                            <Button x:Name="UpdateAllButton"
+                                    Grid.Column="1"
+                                    Click="OnUpdateAllClick"
+                                    ToolTip.Tip="执行 pi update --extensions,把已安装的包更新到各自允许的最新版本">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE895;" FontSize="14" VerticalAlignment="Center"/>
+                                    <TextBlock Text="全部更新" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                        </Grid>
+                        <!-- 只在"用的是 pi-web 自带的那份 pi"时出现(见 PackagesPageControl.UpdatePiSourceHint):
+                             默认(PATH 上的全局 pi)下不必每次都念叨 -->
+                        <TextBlock x:Name="PiSourceText"
+                                   IsVisible="False"
+                                   TextWrapping="Wrap"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}"/>
+                    </StackPanel>
+
+                    <!-- 空态与列表叠在同一格里:空态时列表不可见,反之亦然 -->
+                    <Grid Grid.Row="2">
+                        <TextBlock x:Name="InstalledEmptyText"
+                                   TextWrapping="Wrap"
+                                   VerticalAlignment="Top"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+
+                        <ScrollViewer x:Name="InstalledScroll"
+                                      IsVisible="False"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      VerticalScrollBarVisibility="Auto">
+                            <!-- ⚠ Padding="0 0 12 0":Fluent 的滚动条是**浮在内容之上**的,
+                                 而行模板里的按钮是右对齐的 —— 不留出这条宽度,滚动条就正好压在
+                                 「卸载」上(实测:按钮右半边被盖住)。外层的 12 不够,因为它落在
+                                 ScrollViewer 之外,滚动条占的是 ScrollViewer 的内侧。
+                                 Auto 模式下滚动条只在本栏溢出时出现,所以这条留白只在需要时"生效"。 -->
+                            <ItemsControl x:Name="InstalledList" Padding="0 0 12 0">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="models:PiInstalledPackage">
+                                        <Border BorderThickness="0,0,0,1"
+                                                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                                Padding="0 10">
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                <StackPanel Grid.Column="0" Spacing="2">
+                                                    <TextBlock Classes="itemName" Text="{Binding Name}"/>
+                                                    <TextBlock Classes="itemMeta" Text="{Binding MetaText}"/>
+                                                    <TextBlock Classes="itemMeta"
+                                                               Text="{Binding Source}"
+                                                               ToolTip.Tip="{Binding InstalledPath}"/>
+                                                    <TextBlock Classes="itemMeta"
+                                                               IsVisible="{Binding StateText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                                                               Foreground="{DynamicResource SystemFillColorCautionBrush}"
+                                                               Text="{Binding StateText}"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center">
+                                                    <Button Classes="uninstallButton"
+                                                            Click="OnUninstallClick"
+                                                            HorizontalAlignment="Right">
+                                                        <TextBlock Text="{Binding UninstallText}"/>
+                                                    </Button>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
+            </Border>
+
+            <!-- 目录:pi.dev/packages 的条目 -->
+            <Border Grid.Column="1" Classes="card" Padding="12">
+                <Grid RowDefinitions="*,Auto" RowSpacing="10">
+                    <Grid Grid.Row="0">
+                        <TextBlock x:Name="CatalogEmptyText"
+                                   TextWrapping="Wrap"
+                                   VerticalAlignment="Top"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+
+                        <ScrollViewer x:Name="CatalogScroll"
+                                      IsVisible="False"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      VerticalScrollBarVisibility="Auto">
+                            <!-- 同左栏:给浮在内容上的滚动条留出宽度,否则它会压住右对齐的「详情」按钮 -->
+                            <ItemsControl x:Name="CatalogList" Padding="0 0 12 0">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="models:PiPackageEntry">
+                                        <Border BorderThickness="0,0,0,1"
+                                                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                                                Padding="0 12">
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                                <StackPanel Grid.Column="0" Spacing="4">
+                                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                                        <TextBlock Classes="itemName"
+                                                                   Text="{Binding Name}"
+                                                                   VerticalAlignment="Center"/>
+                                                        <Border Classes="chip installed" IsVisible="{Binding IsInstalled}">
+                                                            <TextBlock Text="{Binding InstalledText}"/>
+                                                        </Border>
+                                                        <Border Classes="chip">
+                                                            <TextBlock Text="{Binding TypeText}"/>
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock Classes="itemDesc" Text="{Binding Description}"/>
+                                                    <TextBlock Classes="itemMeta" Text="{Binding MetaText}"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center">
+                                                    <Button Classes="accent installButton"
+                                                            Click="OnInstallFromCatalogClick"
+                                                            HorizontalAlignment="Right"
+                                                            ToolTip.Tip="{Binding InstallSpec}">
+                                                        <TextBlock Text="安装"/>
+                                                    </Button>
+                                                    <Button Click="OnOpenPackagePageClick"
+                                                            HorizontalAlignment="Right"
+                                                            ToolTip.Tip="在浏览器里打开该包的目录详情页">
+                                                        <TextBlock Text="详情"/>
+                                                    </Button>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Grid>
+
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+                        <Button x:Name="LoadMoreButton"
+                                IsVisible="False"
+                                Click="OnLoadMoreClick"
+                                ToolTip.Tip="目录有 100+ 页,启动器每次只取若干页;继续往下拉会追加到列表末尾">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE74B;" FontSize="14" VerticalAlignment="Center"/>
+                                <TextBlock Text="加载更多" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <TextBlock x:Name="CatalogEndText"
+                                   IsVisible="False"
+                                   VerticalAlignment="Center"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Text="已经到底了"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- ③ 点空白处关闭输出浮窗:一层透明的命中层,盖住**内容区**(第 1 行)。
+             - 放在浮窗**之前**声明 ⇒ z 序在浮窗之下,浮窗里的复制/清空/关闭按钮不受影响。
+             - 只盖内容区、不盖筛选栏 ⇒ 筛选栏的「输出」按钮仍能当开关用(点它关、再点开)。
+             - Background 必须给透明画刷:Avalonia 里 null 不参与命中测试,必须 Transparent 才收得到点击 -->
+        <Border x:Name="OperationLogDismissLayer"
+                Grid.Row="1"
+                IsVisible="False"
+                Background="Transparent"
+                PointerPressed="OnOperationLogDismissPressed"/>
+
+        <!-- 安装输出浮窗:由筛选栏的「输出」按钮开关。从筛选栏下方垂下来(内容区顶部右对齐),
+             不占布局空间;声明在内容与命中层之后,所以盖在它们之上。
+             装包/卸载/更新的全部输出都落在这里,与首页的 `pi-web` 日志分开 —— 两类信息混在一起时谁也看不清 -->
+        <Border x:Name="OperationLogFlyout"
+                Grid.Row="1"
+                IsVisible="False"
+                Width="580"
+                Height="340"
+                Margin="0 4 20 0"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top"
+                Padding="16"
+                CornerRadius="8"
+                Background="{DynamicResource SolidBackgroundFillColorBaseBrush}"
+                BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                BoxShadow="0 8 24 4 #40000000">
+            <Grid RowDefinitions="Auto,*">
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0 0 0 10">
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock Text="安装输出"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                        <ui:FAProgressRing x:Name="OperationProgress"
+                                           Width="18"
+                                           Height="18"
+                                           IsActive="False"
+                                           VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="8"
+                                VerticalAlignment="Center">
+                        <Button x:Name="CopyOperationLogButton" Click="OnCopyOperationLogClick">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8C8;" FontSize="14" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="CopyOperationLogButtonText" Text="复制" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Click="OnClearOperationLogClick"
+                                ToolTip.Tip="清空安装输出面板">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE74D;" FontSize="14" VerticalAlignment="Center"/>
+                                <TextBlock Text="清空" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Click="OnCloseOperationLogClick"
+                                ToolTip.Tip="关闭输出浮窗">
+                            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE711;" FontSize="14" VerticalAlignment="Center"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
+
+                <Border Grid.Row="1"
+                        Background="{DynamicResource CodeAreaFillBrush}"
+                        CornerRadius="4"
+                        Padding="10">
+                    <!-- Padding 右侧留 12:滚动条是浮在内容上的,不留白会把长行压住 -->
+                    <ScrollViewer x:Name="OperationLogScroll"
+                                  Padding="0 0 12 0"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <SelectableTextBlock x:Name="OperationLogTextBlock"
+                                             TextWrapping="Wrap"
+                                             FontFamily="Consolas"
+                                             FontSize="12"
+                                             LineHeight="18"
+                                             Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

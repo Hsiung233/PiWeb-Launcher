@@ -1,0 +1,425 @@
+using System;
+using System.IO;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Platform;
+using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using PiWeb_Launcher.Models;
+
+namespace PiWeb_Launcher.Services
+{
+    /// <summary>
+    /// WebView 窗口(应用内打开 Web 端)与引擎信息。
+    /// 用系统默认浏览器打开地址的部分已拆到 <see cref="BrowserLauncher"/>。
+    /// </summary>
+    public static class WebOpener
+    {
+        /// <summary>
+        /// WebView 窗口会话(单例复用)。窗口在首次打开时创建,之后一直保留:
+        /// 用户点关闭只是隐藏窗口,从而避免每次打开都重建 WebView2 环境。
+        /// </summary>
+        private sealed class WebViewSession
+        {
+            public required Window Window { get; init; }
+            public required NativeWebView WebView { get; init; }
+            public required WindowStateTracker Tracker { get; init; }
+
+            /// <summary>
+            /// 最近一次实际请求加载的地址。判断是否需要重新导航时必须用这个**自己记录**的值,
+            /// 而不能用 <c>WebView.Source</c>:Source 会被页内跳转(SPA 路由)、以及隐藏时的
+            /// 适配器处理改写,拿它比较会导致每次从托盘打开都白白重载一遍页面。
+            /// </summary>
+            public string RequestedUrl { get; set; } = string.Empty;
+        }
+
+        private static WebViewSession? _session;
+
+        /// <summary>true 表示应用正在退出:此时不再拦截关闭请求,让窗口真正销毁。</summary>
+        private static bool _shuttingDown;
+
+        /// <summary>
+        /// 从设置解析“隐藏后保留窗口”的时长。未设置(0)或超出范围时回退到默认 5 分钟。
+        /// 实测一个已加载页面的 WebView2 子进程合计约 470MB,因此超时后要真正关闭窗口把内存还回去。
+        /// 每次使用都现算,改设置无需重启即可生效。
+        /// </summary>
+        private static TimeSpan GetIdleCloseDelay()
+        {
+            var minutes = SettingsService.Instance.Settings.WebViewIdleTimeoutMinutes;
+            if (minutes is < AppSettings.MinWebViewIdleTimeoutMinutes or > AppSettings.MaxWebViewIdleTimeoutMinutes)
+            {
+                minutes = AppSettings.DefaultWebViewIdleTimeoutMinutes;
+            }
+
+            return TimeSpan.FromMinutes(minutes);
+        }
+
+        private static DispatcherTimer? _idleCloseTimer;
+
+        /// <summary>
+        /// 应用退出前调用,放行 WebView 窗口的真正关闭。
+        /// 不做这一步的话,“关闭即隐藏”的拦截会让 Shutdown() 关不掉窗口,应用无法退出。
+        /// </summary>
+        public static void BeginShutdown()
+        {
+            _shuttingDown = true;
+            _idleCloseTimer?.Stop();
+        }
+
+        /// <summary>窗口转入隐藏后开始计时;超时仍未重新打开,就真正关闭窗口以释放 WebView2 内存。</summary>
+        private static void ScheduleIdleClose()
+        {
+            if (_idleCloseTimer is null)
+            {
+                var timer = new DispatcherTimer();
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    CloseIfStillHidden();
+                };
+                _idleCloseTimer = timer;
+            }
+
+            // 每次都从设置重取时长:用户改了设置无需重启即可生效
+            _idleCloseTimer.Interval = GetIdleCloseDelay();
+            _idleCloseTimer.Stop();
+            _idleCloseTimer.Start();
+        }
+
+        /// <summary>空闲超时回调:窗口仍处于隐藏状态时真正关闭它(释放 WebView2 进程)。</summary>
+        private static void CloseIfStillHidden()
+        {
+            var session = _session;
+            if (session is null || session.Window.IsVisible || _shuttingDown)
+            {
+                return;
+            }
+
+            AppLogService.Write(
+                $"[WebView] 隐藏已超过 {GetIdleCloseDelay().TotalMinutes:0} 分钟,关闭窗口以释放 WebView2 内存");
+            CloseSession();
+        }
+
+        /// <summary>
+        /// 立即真正关闭 WebView 窗口并释放 WebView2 进程(与“关闭即隐藏”相反)。
+        /// 用于 pi 已停止(窗口里只剩死页面)、应用退出或空闲超时等场景。可在任意线程调用。
+        /// </summary>
+        public static void CloseSession()
+        {
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                Dispatcher.UIThread.Post(CloseSession);
+                return;
+            }
+
+            _idleCloseTimer?.Stop();
+
+            var session = _session;
+            if (session is null)
+            {
+                return;
+            }
+
+            // 先摘除会话:否则 Closing 里的“关闭即隐藏”会拦住这次真正的关闭
+            _session = null;
+            try
+            {
+                // 关闭前落盘位置/尺寸/最大化状态,保证下次打开仍能还原
+                session.Tracker.Save();
+                session.Window.Close();
+                AppLogService.Write("[WebView] 已关闭窗口并释放 WebView2 进程");
+            }
+            catch (Exception ex)
+            {
+                AppLogService.Write($"[WebView] 关闭窗口失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>按指定方式打开地址。</summary>
+        public static void Open(WebOpenAction action, string url)
+        {
+            if (action == WebOpenAction.WebView)
+            {
+                OpenInWebView(url);
+            }
+            else
+            {
+                BrowserLauncher.OpenInBrowser(url);
+            }
+        }
+
+        /// <summary>
+        /// 当前平台原生的 WebView 适配器类型。
+        /// 包内各适配器的探测实现:<see cref="WebViewAdapterType.WebView2"/> 只在 Windows 上已安装时可用,
+        /// <see cref="WebViewAdapterType.WkWebView"/> 在 macOS(10.10+)恒可用。
+        /// 应用内 <see cref="NativeWebView"/> 正是按同样的平台顺序自动选择适配器,两处保持一致。
+        /// </summary>
+        private static WebViewAdapterType CurrentAdapterType => PlatformProcess.IsWindows ? WebViewAdapterType.WebView2 : WebViewAdapterType.WkWebView;
+
+        /// <summary>当前平台 WebView 引擎的展示名(仅用于界面文案/日志)。</summary>
+        public static string EngineDisplayName => PlatformProcess.IsWindows ? "WebView2" : "WKWebView";
+
+        /// <summary>
+        /// 描述当前平台 WebView 引擎的运行时状态(是否可用、版本、不可用原因),供界面展示与排查。
+        /// 用的是静态查询接口,不需要先创建 WebView,所以未打开过 WebView 时也能报告。
+        /// </summary>
+        public static string DescribeWebViewRuntime()
+        {
+            try
+            {
+                var info = WebViewAdapterInfo.GetAdapterInfo(CurrentAdapterType);
+                if (!info.IsInstalled)
+                {
+                    return $"不可用({info.UnavailableReason ?? "原因未知"})";
+                }
+
+                var version = string.IsNullOrWhiteSpace(info.Version) ? "(版本未知)" : info.Version;
+                return info.IsSupported ? version : $"{version} (当前场景不受支持)";
+            }
+            catch (Exception ex)
+            {
+                return $"查询失败: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// 处理 WebView 内部发起的“新窗口/新标签”请求(target="_blank"、window.open 等)。
+        /// <see cref="WebViewLinkTarget.AppWebView"/>:不接管,交由 WebView2 底层默认处理;
+        /// <see cref="WebViewLinkTarget.SystemBrowser"/>:接管并改由系统默认浏览器打开。
+        /// </summary>
+        private static void OnNewWindowRequested(WebViewNewWindowRequestedEventArgs e)
+        {
+            var mode = SettingsService.Instance.Settings.WebViewLink;
+            if (mode == WebViewLinkTarget.AppWebView)
+            {
+                // 不置 Handled,完全交给 WebView2 底层行为
+                return;
+            }
+
+            var target = e.Request;
+            if (target is null)
+            {
+                return;
+            }
+
+            // 接管:必须置 Handled,否则底层可能又自行开一个窗口。
+            // 注意:e 只在本次回调内有效,之后(尤其跨线程)不能再捕获它。
+            e.Handled = true;
+
+            var url = target.ToString();
+            AppLogService.Write($"[WebView] 页面请求打开链接({mode}): {url}");
+            BrowserLauncher.OpenInBrowser(url);
+        }
+
+        /// <summary>
+        /// 在应用内 WebView 窗口中打开。已有窗口时只把窗口切到前台,**不重载页面**
+        /// (窗口关闭只是隐藏,页面与 WebView2 进程都保留着)。
+        /// 仅当 pi 地址确实变化(pi 重启后 token 变了、或改了监听端口)才重新导航。
+        /// WebView2 运行时不可用等异常时退回系统浏览器。
+        /// </summary>
+        public static void OpenInWebView(string url)
+        {
+            // 托盘回调可能来自非 UI 线程,而本方法会创建/操作控件;统一调度到 UI 线程
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                Dispatcher.UIThread.Post(() => OpenInWebView(url));
+                return;
+            }
+
+            var existing = _session;
+            if (existing is not null)
+            {
+                // 复用已有窗口:直接切到前台,不重载页面(页面和 WebView2 进程都还在)。
+                // 只有 pi 地址真的变了(pi 重启后 token 变化、或改了端口)才需要重新导航,
+                // 否则会把用户当前所在的页面状态重置掉。
+                _idleCloseTimer?.Stop();
+
+                if (existing.RequestedUrl != url)
+                {
+                    existing.RequestedUrl = url;
+                    existing.WebView.Navigate(new Uri(url));
+                    AppLogService.Write($"[WebView] pi 地址已变化,复用窗口并导航到新地址: {url}");
+                }
+                else
+                {
+                    AppLogService.Write("[WebView] 复用已有窗口(直接显示,不重载)");
+                }
+
+                existing.Window.Show();
+                existing.Window.Activate();
+                return;
+            }
+
+            CreateAndShow(url);
+        }
+
+        /// <summary>
+        /// 指定 WebView2 的用户数据目录(Cookie/缓存/LocalStorage 等)到 %LOCALAPPDATA%。
+        /// 事件在适配器创建 WebView2 环境时触发一次(每个 NativeWebView 实例一次),
+        /// 同步赋值即可,无需 <c>GetDeferral()</c>。仅 Windows 生效;macOS 的 WKWebView
+        /// 数据由系统管理,没有对应参数。
+        /// </summary>
+        private static void OnWebViewEnvironmentRequested(object? sender, WebViewEnvironmentRequestedEventArgs e)
+        {
+            if (e is not WindowsWebView2EnvironmentRequestedEventArgs webView2Args)
+            {
+                return;
+            }
+
+            try
+            {
+                var userDataFolder = Path.Combine(
+                    PlatformProcess.LocalAppDataDirectory, "PiWeb Launcher", "WebView2");
+                Directory.CreateDirectory(userDataFolder);
+                webView2Args.UserDataFolder = userDataFolder;
+                AppLogService.Write($"[WebView] WebView2 数据目录: {userDataFolder}");
+            }
+            catch (Exception ex)
+            {
+                // 建目录失败就不指定,让 WebView2 走默认位置(exe 同级),仅记录原因
+                AppLogService.Write($"[WebView] 无法创建 WebView2 数据目录({ex.Message}),使用默认位置");
+            }
+        }
+
+        /// <summary>首次打开:创建窗口与 WebView2 适配器(冷启动,较慢),之后由 <see cref="OpenInWebView"/> 复用。</summary>
+        private static void CreateAndShow(string url)
+        {
+            Window? window = null;
+            NativeWebView? webView = null;
+            try
+            {
+                webView = new NativeWebView();
+
+                // 指定 WebView2 用户数据目录到 %LOCALAPPDATA%:WebView2 的默认位置是
+                // "<exe 所在目录>\<exe名>.WebView2",装进 Program Files 后会因无写权限而创建失败,
+                // 且 Debug/publish/正式安装各一份导致登录态割裂。必须在适配器创建 WebView2 环境
+                // (首次导航)之前挂上,EnvironmentRequested 在该时机被触发一次。
+                webView.EnvironmentRequested += OnWebViewEnvironmentRequested;
+
+                webView.NavigationStarted += (_, _) =>
+                {
+                    AppLogService.Write($"[WebView] 开始导航");
+                };
+                webView.NavigationCompleted += (_, e) =>
+                {
+                    AppLogService.Write($"[WebView] 导航{(e.IsSuccess ? "完成" : "失败")}");
+                };
+                // 页面自己发起的“新窗口/新标签”请求(如 target="_blank"、window.open),
+                // 按设置决定交给系统浏览器还是在应用内 WebView 打开
+                webView.NewWindowRequested += (_, e) => OnNewWindowRequested(e);
+
+                window = new Window
+                {
+                    Title = "Pi Web",
+                    Content = webView,
+                    Width = 960,
+                    Height = 640,
+                };
+
+                // 窗口图标(logo-512.png 已嵌入程序集资源,见 AppIcon)
+                if (AppIcon.LoadLogo512() is { } icon)
+                {
+                    window.Icon = icon;
+                }
+
+                // 恢复上次的位置/大小与最大化状态;无记录或屏幕校验失败时用默认尺寸(工作区 60%×70% 居中)
+                var bounds = WindowStateService.Instance.RestoreWebViewWindow(window);
+                if (bounds is null)
+                {
+                    var screen = window.Screens?.Primary;
+                    if (screen is not null)
+                    {
+                        var workArea = screen.WorkingArea;
+                        var scaling = window.RenderScaling;
+                        var widthDip = workArea.Width * 0.6 / scaling;
+                        var heightDip = workArea.Height * 0.7 / scaling;
+                        var x = workArea.X + (int)((workArea.Width - widthDip * scaling) / 2);
+                        var y = workArea.Y + (int)((workArea.Height - heightDip * scaling) / 2);
+
+                        window.Width = widthDip;
+                        window.Height = heightDip;
+                        window.Position = new PixelPoint(x, y);
+
+                        // 作为跟踪器的初始值:即使窗口还没记录到任何几何变化就被最大化/关闭,
+                        // 也能存下正确的还原尺寸
+                        bounds = new WindowBounds { X = x, Y = y, Width = widthDip, Height = heightDip };
+                    }
+                }
+
+                // 持续记录非最大化时的位置/尺寸;关闭前保存(含是否最大化)
+                var tracker = WindowStateService.Instance.TrackWebViewWindow(window, bounds);
+
+                window.Closing += (_, e) =>
+                {
+                    // 关闭前记录位置/尺寸/最大化状态(Closed 时平台实现已销毁,Position 会回退为 0,0,
+                    // 存了就会导致下次打开位置重置到左上角)
+                    tracker.Save();
+
+                    // 应用正在退出,或该窗口已从会话中摘除(创建失败的回退路径):放行,让窗口真正关闭
+                    if (_shuttingDown || !ReferenceEquals(_session?.Window, window))
+                    {
+                        return;
+                    }
+
+                    // 用户点关闭 → 按设置决定:保留(仅隐藏)还是立即释放
+                    if (!SettingsService.Instance.Settings.KeepWebViewAlive)
+                    {
+                        // 不保留:放行关闭,WebView2 进程随之释放(下次打开需重新加载)
+                        AppLogService.Write("[WebView] 按设置不保留窗口,关闭并释放 WebView2 进程");
+                        return;
+                    }
+
+                    // 保留窗口与 WebView2 适配器:下次打开只是一次 Show(),不必再付冷启动的代价
+                    e.Cancel = true;
+                    window.Hide();
+                    AppLogService.Write("[WebView] 已隐藏窗口(保留 WebView2 进程,便于快速再次打开)");
+                    ScheduleIdleClose();
+                };
+                window.Closed += (_, _) =>
+                {
+                    tracker.Dispose();
+                    _session = null;
+                };
+
+                _session = new WebViewSession
+                {
+                    Window = window,
+                    WebView = webView,
+                    Tracker = tracker,
+                    RequestedUrl = url,
+                };
+                window.Show();
+                window.Activate();
+                AppLogService.Write("[WebView] 窗口已创建并显示");
+
+                // Source 赋值会在适配器就绪后自动导航;适配器创建失败(如缺少 WebView2 运行时)
+                // 不会同步抛异常,这里仅记录日志便于诊断。
+                webView.Source = new Uri(url);
+                AppLogService.Write($"[WebView] 已请求加载: {url}");
+            }
+            catch (Exception ex)
+            {
+                AppLogService.Write($"[WebView] 打开异常({ex.GetType().Name}: {ex.Message}),退回系统浏览器");
+
+                // 先摘除会话再关闭:否则 Closing 里的“关闭即隐藏”会拦住这次回退关闭
+                _session = null;
+                try
+                {
+                    window?.Close();
+                }
+                catch
+                {
+                    // 忽略关闭异常
+                }
+
+                BrowserLauncher.OpenInBrowser(url);
+            }
+        }
+
+        /// <summary>保存 WebView 窗口的位置/尺寸/最大化状态(应用退出前调用,防止关机路径上 Closed 事件不可靠)。</summary>
+        public static void SaveOpenWebViewBounds()
+        {
+            _session?.Tracker.Save();
+        }
+    }
+}

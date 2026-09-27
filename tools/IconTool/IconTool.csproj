@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 图标生成器:**一次性工具**,不参与运行时,也不被别的项目引用。
+       为什么要有它而不是直接塞两个二进制图标进仓库:
+       图标是"产品身份"的一部分,手改像素改不动、也说不清改了什么;用代码画出来,
+       π 的几何形状、配色、圆角、各尺寸的留白都是可读、可复现、可评审的。
+       生成结果(Assets/logo-512.png 与 Assets/logo.ico)仍**提交进仓库** ——
+       构建应用的人不该被迫先跑一遍图标生成。 -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>PiWeb_Launcher.IconTool</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.4" />
+  </ItemGroup>
+
+</Project>

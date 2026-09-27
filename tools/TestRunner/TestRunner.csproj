@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 本地跑测试的小工具。**CI 不用它** —— CI 走标准的 dotnet test(见 .github/workflows/ci.yml)。
+       存在的唯一理由:VSTest 的 testhost 会去 OpenProcess 监视父进程(用于父进程退出时自杀),
+       在受限/沙箱化的开发环境里这一步会被拒绝访问,于是 `dotnet test` 直接报
+       "Testhost 进程已退出,但出现错误: System.ComponentModel.Win32Exception (5): 拒绝访问"。
+
+       做法:把**测试源码**直接编进来(不是引用测试项目 —— 那个项目引用 Microsoft.NET.Test.Sdk,
+       会把 testhost 相关目标一并带进来,正是要绕开的东西),再用反射执行 MSTest 标注的方法。
+       AssemblyName 与测试项目同名,这样测试项目里的 internal 可见性(PiWeb Launcher.csproj 的
+       InternalsVisibleTo)对这里同样成立,测试源码一个字都不用改。 -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>PiWeb Launcher.Tests</AssemblyName>
+    <RootNamespace>PiWeb_Launcher.TestRunner</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\tests\PiWeb Launcher.Tests\*.cs" LinkBase="Tests" />
+  </ItemGroup>
+
+  <!-- 目录解析的测试要读真实页面样本,所以它必须落在输出目录里(与测试项目里的配置一致) -->
+  <ItemGroup>
+    <None Include="..\..\tests\PiWeb Launcher.Tests\Fixtures\**" LinkBase="Fixtures" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MSTest.TestFramework" Version="3.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\PiWeb Launcher\PiWeb Launcher.csproj" />
+  </ItemGroup>
+
+</Project>

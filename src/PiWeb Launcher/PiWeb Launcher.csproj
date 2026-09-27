@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>PiWeb_Launcher</RootNamespace>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- 应用版本:环境面板的"应用版本"与安装包 AppVersion(installer.iss 从发布 exe 读)都取自这里。
+         发布新版本时必须与 git tag 同步改(如 tag v1.0.1 → 这里 1.0.1);
+         ci.yml 的 installer job 会校验两者一致,不一致直接失败。 -->
+    <Version>1.0.0</Version>
+    <!-- Nullable / LangVersion / 分析器设置集中在仓库根的 Directory.Build.props -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\logo.ico</ApplicationIcon>
+    <Platforms>AnyCPU</Platforms>
+    <!-- 默认使用编译期绑定:{Binding} 必须能由 x:DataType / 编译期类型确定,写错属性名会直接编译失败。 -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <!-- 测试项目要能直接测那些表达"格式知识"的 internal 类型
+       (PiCatalogReader / PiListReader / LenientEnumConverter 等)。
+       它们是实现细节,不因为可测就提升为 public —— 只对测试程序集开放。 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="PiWeb Launcher.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Controls.WebView" Version="12.1.0" />
+    <PackageReference Include="FluentAvaloniaUI" Version="3.1.0" />
+    <PackageReference Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.3">
+      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <Target Name="RemoveSymbolsFromPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_SymbolsToExclude Include="@(ResolvedFileToPublish)" Condition="'%(Extension)' == '.pdb'" />
+      <ResolvedFileToPublish Remove="@(_SymbolsToExclude)" />
+    </ItemGroup>
+    <Message Importance="high" Condition="'@(_SymbolsToExclude)' != ''"
+      Text="已从发布输出排除符号文件: @(_SymbolsToExclude->'%(Filename)%(Extension)', ', ')" />
+  </Target>
+</Project>

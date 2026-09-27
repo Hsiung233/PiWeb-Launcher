@@ -1,0 +1,328 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Security.Principal;
+using System.Text.RegularExpressions;
+using PiWeb_Launcher.Models;
+
+namespace PiWeb_Launcher.Services
+{
+    /// <summary>
+    /// “环境设置”(npm 源 / 代理)的唯一落地点:把用户在设置页选的值翻译成
+    /// **子进程环境变量**与 **HTTP 客户端代理**,其它地方不要各自拼一套。
+    ///
+    /// 作用范围(有意为之):
+    /// <list type="bullet">
+    /// <item>走 <see cref="ChildProcessRunner"/> 的全部子进程 —— npm 的
+    /// <c>ls/view/install</c>、<c>where pi</c> / <c>where pi-web</c> 探测、<c>pi install/remove/list</c>。</item>
+    /// <item><see cref="PiPackageService"/> 拉取 pi 包目录用的 HTTP 客户端(目录是网页,不是 npm)。</item>
+    /// <item><c>pi-web</c> 服务进程**只注入代理、不注入 npm 源** —— 原因见
+    /// <see cref="ApplyServiceOverrides"/>。</item>
+    /// </list>
+    ///
+    /// 为什么用环境变量而不是命令行参数:<c>npm</c> 有 <c>--registry</c>,但
+    /// <c>pi install</c> 只是把参数转发给 profile 目录下的 <c>pnpm</c>,拼参数容易漏;
+    /// 而 <c>npm_config_*</c> 是 npm/pnpm 共同认的配置通道(等价于 .npmrc 里的同名键)。
+    /// </summary>
+    public static class ChildEnvironment
+    {
+        /// <summary>“使用配置源”时本机 .npmrc 的默认地址(仅在界面/日志里做提示用)。</summary>
+        public const string PublicNpmRegistry = "https://registry.npmjs.org";
+
+        /// <summary>已知镜像的地址表。<see cref="NpmRegistrySource.Config"/> 不在表内 = 不注入。</summary>
+        private static readonly Dictionary<NpmRegistrySource, string> RegistryUrls = new()
+        {
+            [NpmRegistrySource.NpmOfficial] = PublicNpmRegistry,
+            [NpmRegistrySource.Npmmirror] = "https://registry.npmmirror.com",
+            [NpmRegistrySource.TencentCloud] = "https://mirrors.cloud.tencent.com/npm/",
+            [NpmRegistrySource.HuaweiCloud] = "https://repo.huaweicloud.com/repository/npm/",
+        };
+
+        /// <summary>代理相关的环境变量名。</summary>
+        /// <remarks>
+        /// 两组都要设:
+        /// ① <c>HTTP_PROXY/HTTPS_PROXY</c>(含小写形式)—— 通用约定,pnpm/undici/curl 等都认;
+        /// ② <c>npm_config_proxy/npm_config_https_proxy</c> —— **npm 自身不读 HTTP_PROXY**,
+        /// 它只认 proxy/https-proxy 配置项(可由 <c>npm_config_*</c> 环境变量提供)。
+        /// 只设一组会出现“pnpm 走了代理、npm 没走”这种半生效状态。
+        /// </remarks>
+        private static readonly string[] ProxyVariableNames =
+        [
+            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+            "npm_config_proxy", "npm_config_https_proxy",
+        ];
+
+        /// <summary><c>NO_PROXY</c> 一侧的变量名(npm 的配置项叫 <c>noproxy</c>)。</summary>
+        private static readonly string[] NoProxyVariableNames =
+        [
+            "NO_PROXY", "no_proxy", "npm_config_noproxy",
+        ];
+
+        /// <summary>取枚举对应的 registry 地址;“使用配置源”返回 null(= 不注入)。</summary>
+        public static string? ResolveRegistry(NpmRegistrySource source)
+            => RegistryUrls.TryGetValue(source, out var url) ? url : null;
+
+        /// <summary>枚举对应的人员可读名称(用于界面提示与日志)。</summary>
+        public static string RegistryDisplayName(NpmRegistrySource source) => source switch
+        {
+            NpmRegistrySource.NpmOfficial => "npm 官方",
+            NpmRegistrySource.Npmmirror => "npmmirror(淘宝)",
+            NpmRegistrySource.TencentCloud => "腾讯云",
+            NpmRegistrySource.HuaweiCloud => "华为云",
+            _ => "使用配置源",
+        };
+
+        /// <summary>当前 npm 源的一句话描述(写日志用)。</summary>
+        public static string DescribeRegistry()
+        {
+            var source = SettingsService.Instance.Settings.NpmRegistry;
+            var url = ResolveRegistry(source);
+            return url is null
+                ? "使用配置源(沿用本机 .npmrc / 环境变量)"
+                : $"{RegistryDisplayName(source)} {url}";
+        }
+
+        /// <summary>当前代理的一句话描述(写日志用)。</summary>
+        public static string DescribeProxy()
+        {
+            var proxy = NormalizeProxyUrl(SettingsService.Instance.Settings.ProxyUrl);
+            if (proxy.Length == 0)
+            {
+                return "未使用";
+            }
+
+            var noProxy = NormalizeNoProxy(SettingsService.Instance.Settings.NoProxy);
+            return noProxy.Length == 0 ? proxy : $"{proxy}(不走代理: {noProxy})";
+        }
+
+        /// <summary>
+        /// 归一化代理地址:全角冒号/斜杠转半角(中文输入法下极容易打出来)、去空白;
+        /// 缺协议时补 <c>http://</c>(用户常只填 <c>127.0.0.1:7890</c>);去掉末尾斜杠。空串 = 不使用代理。
+        /// </summary>
+        public static string NormalizeProxyUrl(string? raw)
+        {
+            var value = (raw?.Trim() ?? string.Empty)
+                .Replace('：', ':')
+                .Replace('／', '/');
+
+            if (value.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            if (!value.Contains("://", StringComparison.Ordinal))
+            {
+                value = "http://" + value;
+            }
+
+            return value.TrimEnd('/');
+        }
+
+        /// <summary>
+        /// 归一化“不走代理”列表:按逗号/分号切分、去空白与空项,再用逗号重新拼接
+        /// (统一成一种写法,免得看起来“没变”但确实重新保存了一次)。
+        /// </summary>
+        public static string NormalizeNoProxy(string? raw)
+            => string.Join(",", (raw ?? string.Empty)
+                .Replace('，', ',')
+                .Split([',', ';', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
+                .Select(part => part.Trim())
+                .Where(part => part.Length > 0));
+
+        /// <summary>
+        /// 代理配置的指纹(用于判断已建好的 <see cref="HttpClient"/> 是否需要重建)。
+        /// 代理改了免重启即可生效:拉目录前比对一次,不同就换掉旧客户端。
+        /// </summary>
+        public static string ProxyKey()
+        {
+            var settings = SettingsService.Instance.Settings;
+            return NormalizeProxyUrl(settings.ProxyUrl) + "\n" + NormalizeNoProxy(settings.NoProxy);
+        }
+
+        /// <summary>把当前环境设置注入子进程(registry + 代理)。</summary>
+        public static void Apply(ProcessStartInfo psi)
+        {
+            var settings = SettingsService.Instance.Settings;
+
+            var registry = ResolveRegistry(settings.NpmRegistry);
+            if (registry is not null)
+            {
+                psi.Environment["npm_config_registry"] = registry;
+            }
+
+            var proxy = NormalizeProxyUrl(settings.ProxyUrl);
+            if (proxy.Length == 0)
+            {
+                return;
+            }
+
+            foreach (var name in ProxyVariableNames)
+            {
+                psi.Environment[name] = proxy;
+            }
+
+            var noProxy = NormalizeNoProxy(settings.NoProxy);
+            if (noProxy.Length > 0)
+            {
+                foreach (var name in NoProxyVariableNames)
+                {
+                    psi.Environment[name] = noProxy;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 把"环境设置"注入 **Pi Web 服务进程**。
+        /// <para>
+        /// 与服务进程的唯一区别:这里**不**注入 <c>npm_config_*</c>。
+        /// <list type="bullet">
+        /// <item>代理**要**注入:pi-web 是服务端,它自己发起的模型/API 请求读的是标准的
+        /// <c>HTTP_PROXY</c> / <c>HTTPS_PROXY</c> / <c>NO_PROXY</c>(README 的"HTTP 代理"一节),
+        /// 不注入的话,需要代理才能连上的模型服务在界面里会直接报连接失败。</item>
+        /// <item>npm 源**不**注入:服务进程里没有 npm 操作,而 <c>npm_config_*</c> 会跟着
+        /// 环境被 pi 的子进程继承 —— 一旦 pi 在会话里装了包,那些变量会让结果与用户
+        /// 在自己终端里跑出来的不一样(排查起来极难)。</item>
+        /// <item>NO_PROXY 里始终补上回环地址:WebView/浏览器访问 <c>127.0.0.1</c> 不该绕一圈代理。</item>
+        /// </list>
+        /// </para>
+        /// </summary>
+        public static void ApplyServiceOverrides(ProcessStartInfo psi)
+        {
+            var settings = SettingsService.Instance.Settings;
+            var proxy = NormalizeProxyUrl(settings.ProxyUrl);
+
+            if (proxy.Length > 0)
+            {
+                foreach (var name in ProxyVariableNames)
+                {
+                    psi.Environment[name] = proxy;
+                }
+            }
+
+            var noProxy = NormalizeNoProxy(settings.NoProxy);
+            var noProxyWithLoopback = MergeLoopback(noProxy);
+            foreach (var name in NoProxyVariableNames)
+            {
+                psi.Environment[name] = noProxyWithLoopback;
+            }
+        }
+
+        /// <summary>回环地址始终不走代理(合并进用户填的 NO_PROXY,去重)。</summary>
+        internal static string MergeLoopback(string noProxy)
+        {
+            var entries = new List<string>(noProxy.Split(',', StringSplitOptions.RemoveEmptyEntries));
+            foreach (var required in new[] { "localhost", "127.0.0.1", "::1" })
+            {
+                if (!entries.Contains(required, StringComparer.OrdinalIgnoreCase))
+                {
+                    entries.Add(required);
+                }
+            }
+
+            return string.Join(",", entries);
+        }
+
+        /// <summary>
+        /// 兼容层变量名(<c>__COMPAT_LAYER</c>)。
+        /// <para>
+        /// 实测(2026-09-18):安装器“安装完成后启动”的进程链里该变量非空(见过
+        /// <c>DetectorsAppHealth</c>/<c>ElevateCreateProcess</c>);真正致败的是 Windows 在
+        /// **加载器层随链继承的 AppCompat shim 本体** —— 它让 pi 对 profile 依赖的 junction
+        /// 大面积不可达(<c>Cannot find package</c>),而环境变量只是它的影子。
+        /// ⚠ 所以“清子进程环境变量”无效,该清理已删除。
+        /// </para>
+        /// <para>
+        /// 现在它只用于两件事:启动时写 app.log 留证,以及作为 App.axaml.cs 里“逃逸上游进程链”的触发信号。
+        /// 注意后者是**通用**的(不限安装器):任何把本程序当子进程拉起、且带链级兼容层标记的父进程
+        /// (安装器、部署工具、包装脚本、将来的自动更新器)都会命中。
+        /// </para>
+        /// </summary>
+        public const string CompatibilityLayerVariable = "__COMPAT_LAYER";
+
+        /// <summary>提权文件复制标记变量的前缀(仅用于启动时统计个数留证)。</summary>
+        private const string EfcVariablePrefix = "EFC_";
+
+        /// <summary>
+        /// 当前进程是否以管理员权限运行(非 Windows 恒为 false),仅用于启动时写 app.log 留证。
+        /// <para>
+        /// ⚠ 提权**不是**"安装器启动时 pi 起不来"的原因(已实测排除);真因是上游进程链的
+        /// 链级兼容层标记,见 <see cref="CompatibilityLayerVariable"/> 与 App.axaml.cs 的逃逸逻辑。
+        /// </para>
+        /// </summary>
+        public static bool IsElevated()
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return false;
+            }
+
+            try
+            {
+                using var identity = WindowsIdentity.GetCurrent();
+                return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 当前进程环境里是否有"上游进程链/提权残留"变量(诊断用,启动时写入 app.log)。
+        /// 判断依据:是否提权、<c>__COMPAT_LAYER</c> 的值、<c>EFC_*</c> 的个数。
+        /// </summary>
+        public static string DescribeInheritedVariables()
+        {
+            var layer = Environment.GetEnvironmentVariable(CompatibilityLayerVariable);
+            var layerText = string.IsNullOrEmpty(layer) ? "(空值,兼容层未生效)" : $"={layer}";
+
+            var efc = Environment.GetEnvironmentVariables().Keys
+                .OfType<string>()
+                .Count(key => key.StartsWith(EfcVariablePrefix, StringComparison.OrdinalIgnoreCase));
+
+            return $"环境:{(IsElevated() ? "管理员权限" : "普通权限")};"
+                + $"{CompatibilityLayerVariable}{layerText};{efc} 个 EFC_* 变量"
+                + (string.IsNullOrEmpty(layer) ? string.Empty : "(链级兼容层:启动时会逃逸出上游进程链重开自己)");
+        }
+
+        /// <summary>
+        /// 给应用自己发起的 HTTP 请求套上代理(插件目录下载)。
+        /// 子进程的环境变量对进程内的 <see cref="HttpClient"/> 无效,必须显式设 handler。
+        /// </summary>
+        public static void ApplyProxy(HttpClientHandler handler)
+        {
+            var proxy = NormalizeProxyUrl(SettingsService.Instance.Settings.ProxyUrl);
+            if (proxy.Length == 0)
+            {
+                return;
+            }
+
+            var webProxy = new WebProxy(proxy)
+            {
+                // 本机地址不经代理:目录里没有本机地址,但显式声明语义更清楚
+                BypassProxyOnLocal = true,
+            };
+
+            // 条目既支持精确主机名也支持域名后缀(localhost / .corp.com),统一按“后缀匹配”处理:
+            // .NET 的 BypassList 是正则表,主机名要转义,只匹配整个主机(含子域)以免误伤同前缀域名。
+            // 先收集再一次性赋值:逐条读回 BypassList 再加一条是 O(n²) 的数组复制,也容易被误读成“覆盖”。
+            var bypass = new List<string>();
+            foreach (var entry in NormalizeNoProxy(SettingsService.Instance.Settings.NoProxy)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                bypass.Add($@"(^|\.){Regex.Escape(entry.TrimStart('*', '.'))}$");
+            }
+
+            if (bypass.Count > 0)
+            {
+                webProxy.BypassList = [.. bypass];
+            }
+
+            handler.Proxy = webProxy;
+            handler.UseProxy = true;
+        }
+    }
+}

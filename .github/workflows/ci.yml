@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]   # tags 必须单独列出:branches 过滤器不包含 tag,否则打 tag 不会触发发布
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 发布 Release 需要写权限
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 .NET SDK(按 global.json)
+        uses: actions/setup-dotnet@v4
+
+      - name: 还原依赖
+        run: dotnet restore "PiWeb Launcher.slnx"
+
+      - name: 构建
+        run: dotnet build "PiWeb Launcher.slnx" --no-restore -c Release
+
+      # 测试项目不在 .slnx 里(见 slnx 内的说明),必须单独构建;
+      # 不构建的话 dotnet test --no-build 会静默匹配 0 个测试文件而"假通过"。
+      - name: 构建测试项目
+        run: dotnet build "tests/PiWeb Launcher.Tests/PiWeb Launcher.Tests.csproj" -c Release
+
+      - name: 测试
+        run: dotnet test "tests/PiWeb Launcher.Tests/PiWeb Launcher.Tests.csproj" -c Release --no-build --nologo
+
+  # 打 tag(如 v1.2.0)时额外构建安装包并上传为 Artifact
+  installer:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-test
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 .NET SDK(按 global.json)
+        uses: actions/setup-dotnet@v4
+
+      # tag 是版本号的唯一事实来源:打包前把 csproj 的 <Version> 改成 tag 的值,
+      # 应用自身版本、环境面板"应用版本"、安装包 AppVersion 随之自动一致,无需手动同步。
+      - name: 用 tag 覆盖应用版本
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          if ($tag -notmatch '^\d+(\.\d+){1,3}$') { throw "tag 不符合版本号格式: $tag" }
+          $csproj = "src/PiWeb Launcher/PiWeb Launcher.csproj"
+          (Get-Content $csproj -Raw) -replace '(?m)^(\s*<Version>)[^<]*(</Version>)', "`${1}$tag`${2}" |
+            Set-Content $csproj -NoNewline -Encoding utf8
+          Select-String $csproj -Pattern '<Version>' | ForEach-Object { $_.Line.Trim() }
+
+      - name: 安装 Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: 构建安装包
+        run: ./Build-Installer.ps1
+
+      # 双保险:打完包后核对 exe 的 FileVersion 确实等于 tag(防止上面的替换没生效)。
+      - name: 校验产物版本与 tag 一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $exe = "src/PiWeb Launcher/bin/Publish/win_x64/PiWeb Launcher.exe"
+          if (-not (Test-Path $exe)) { throw "找不到发布产物 $exe(发布步骤未执行?)" }
+          $ver = (Get-Item $exe).VersionInfo.FileVersion
+          Write-Host "tag=$tag exe=$ver"
+          # MSBuild 会把 <Version> 补齐成 4 段(1.1.0 → 1.1.0.0)写入 Win32 VERSIONINFO,
+          # 所以不能做字符串严格比较,要按版本段比较(tag 未写出的段视为任意)。
+          $t = [Version]$tag
+          $v = [Version]$ver
+          $mismatch =
+            ($v.Major -ne $t.Major) -or ($v.Minor -ne $t.Minor) -or
+            (($t.Build -ge 0) -and ($v.Build -ne $t.Build)) -or
+            (($t.Revision -ge 0) -and ($v.Revision -ne $t.Revision))
+          if ($mismatch) { throw "应用版本($ver)与 tag($tag)不一致,发布中止。" }
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: setup/*.exe
+          if-no-files-found: error
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: setup/*.exe
+          generate_release_notes: true

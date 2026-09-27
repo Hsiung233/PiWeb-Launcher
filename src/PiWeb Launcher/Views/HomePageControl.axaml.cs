@@ -1,0 +1,676 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading.Tasks;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Interactivity;
+using Avalonia.Media;
+using Avalonia.Threading;
+using PiWeb_Launcher.Services;
+using PiWeb_Launcher.Views.Shared;
+using FluentAvalonia.UI.Controls;
+
+namespace PiWeb_Launcher.Views
+{
+    public partial class HomePageControl : UserControl
+    {
+        private readonly PiWebService _service = PiWebService.Instance;
+
+        // 启动失败弹窗互斥标志:内容对话框同时只能打开一个
+        private bool _startFailedDialogOpen;
+
+        // Node.js 缺失弹窗互斥标志:内容对话框同时只能打开一个
+        private bool _nodeMissingDialogOpen;
+
+        // Node.js 官网中文下载页(「前往官网下载」按钮的目标)
+        private const string NodeDownloadUrl = "https://nodejs.org/zh-cn/download";
+
+        // 端口控件回填期间置位,避免把“回填”当成用户修改而触发保存
+        private bool _launchOptionsInitializing;
+
+        // 环境信息:静态项(Node/npm/pi 路径)首次查得后缓存,避免每次展开都起子进程
+        private bool _environmentLoaded;
+        private string? _envNode;
+        private string? _envNpm;
+        private string? _envPiPath;
+        private string? _envPiWebPath;
+
+        // 上一次已知的运行状态,用于识别“运行中 → 已停止”的转换,从而在停止后补一次更新检测
+        private bool _wasRunning;
+
+        // 端口有效范围(与 XAML 里 NumericUpDown 的 Minimum/Maximum 保持一致)
+        private const int MinPort = 1;
+        private const int MaxPort = 65535;
+
+        /// <summary>日志面板的刷新节流器(间隔与“为什么不能逐行刷新”见 <see cref="LogAppendThrottle"/>)。</summary>
+        private readonly LogAppendThrottle _logThrottle;
+
+        /// <summary>三处「复制」按钮的反馈(复制成功才把按钮文字闪成「已复制」)。</summary>
+        private readonly CopyFeedback _webUrlCopy;
+        private readonly CopyFeedback _logCopy;
+        private readonly CopyFeedback _envCopy;
+
+        public HomePageControl()
+        {
+            InitializeComponent();
+
+            this._logThrottle = new LogAppendThrottle(this.UpdateLog);
+            this._webUrlCopy = new CopyFeedback(this.CopyWebUrlButtonText, "复制URL");
+            this._logCopy = new CopyFeedback(this.CopyLogButtonText, "复制");
+            this._envCopy = new CopyFeedback(this.CopyEnvButtonText, "复制");
+
+            // 对应 WinUI 版的 Loaded/Unloaded:服务是单例,进程保持运行;进出页面时挂接/解除事件
+            AttachedToVisualTree += OnPageAttached;
+            DetachedFromVisualTree += OnPageDetached;
+        }
+
+        private async void OnPageAttached(object? sender, EventArgs e)
+        {
+            this._service.LogAppended += this.Service_LogAppended;
+            this._service.StateChanged += this.Service_StateChanged;
+            this._service.StartFailed += this.Service_StartFailed;
+            this._service.LogsCleared += this.Service_LogsCleared;
+            this._service.WebUrlDetected += this.Service_WebUrlDetected;
+
+            this.UpdateLog();
+            this.UpdateButtons();
+            this.InitLaunchOptions();
+            this._wasRunning = this._service.IsRunning;
+            await this.RefreshStatusAsync();
+
+            // 环境信息要起子进程查询(约 1 秒),放后台跑,不阻塞页面显示;
+            // 静态项首次查得后缓存,后续进页面只重拼字符串
+            _ = this.EnsureEnvironmentLoadedAsync();
+        }
+
+        private void OnPageDetached(object? sender, EventArgs e)
+        {
+            this._service.LogAppended -= this.Service_LogAppended;
+            this._service.StateChanged -= this.Service_StateChanged;
+            this._service.StartFailed -= this.Service_StartFailed;
+            this._service.LogsCleared -= this.Service_LogsCleared;
+            this._service.WebUrlDetected -= this.Service_WebUrlDetected;
+        }
+
+        private async Task RefreshStatusAsync()
+        {
+            if (this._service.IsInstalling)
+            {
+                this.UpdateButtons();
+                return;
+            }
+
+            this.HeaderProgress.IsActive = true;
+            await this._service.GetInstalledVersionAsync();
+            // 运行中不检测更新(避免不必要的 npm 查询),待服务停止后再检测
+            if (!this._service.IsRunning)
+            {
+                await this._service.CheckForUpdateAsync();
+            }
+
+            this.HeaderProgress.IsActive = false;
+            this.UpdateButtons();
+        }
+
+        private void UpdateButtons()
+        {
+            var installed = this._service.InstalledVersion is not null;
+            var installing = this._service.IsInstalling;
+            var running = this._service.IsRunning;
+
+            this.StatusSubText.Text = installing
+                ? "正在安装..."
+                : installed
+                    ? $"v{this._service.InstalledVersion}"
+                    : "未安装";
+            ToolTip.SetTip(this.StatusText, installed ? $"@agegr/pi-web@{this._service.InstalledVersion}" : "@agegr/pi-web");
+
+            // 状态徽标:已安装且不在安装中时显示(安装中状态未知,先不显示)
+            var showBadge = installed && !installing;
+            this.StatusBadge.IsVisible = showBadge;
+            if (showBadge)
+            {
+                this.StatusBadgeText.Text = running ? "运行中" : "已停止";
+                this.RunningDot.IsVisible = running;
+                this.StoppedDot.IsVisible = !running;
+            }
+
+            // 按状态互斥显示三组按钮:未安装 / 已安装未运行 / 运行中
+            this.InstallActionsPanel.IsVisible = !installed;
+            this.RunActionsPanel.IsVisible = installed && !running;
+            this.RunningActionsPanel.IsVisible = installed && running;
+
+            // 有新版本时才显示“更新”按钮(仅在未运行时;运行中不允许替换正在使用的包)
+            var updateAvailable = installed && !running && this._service.IsUpdateAvailable;
+            this.UpdateButton.IsVisible = updateAvailable;
+            this.UpdateButton.IsEnabled = !installing;
+            if (updateAvailable)
+            {
+                ToolTip.SetTip(
+                    this.UpdateButton,
+                    $"发现新版本 v{this._service.LatestVersion}(当前 v{this._service.InstalledVersion}),点击更新");
+            }
+
+            this.InstallButton.IsEnabled = !installing;
+            this.RunButton.IsEnabled = !installing;
+            this.StopButton.IsEnabled = !installing;
+            this.RestartButton.IsEnabled = !installing;
+            this.InstallButtonText.Text = installing ? "安装中..." : "安装";
+
+            // Web 端操作按钮:运行中且已从 stdio 检测到 Web 服务地址时显示
+            var hasWebUrl = running && this._service.WebUrl is not null;
+            this.OpenInWebViewButton.IsVisible = hasWebUrl;
+            this.OpenInBrowserButton.IsVisible = hasWebUrl;
+            this.CopyWebUrlButton.IsVisible = hasWebUrl;
+        }
+
+        // ---- 监听端口设置 ----
+
+        /// <summary>把设置中的监听端口与监听地址回填到控件(回填期间不触发保存)。</summary>
+        private void InitLaunchOptions()
+        {
+            this._launchOptionsInitializing = true;
+            try
+            {
+                var settings = SettingsService.Instance.Settings;
+                var port = settings.ListenPort;
+                this.PortBox.Value = port is >= MinPort and <= MaxPort ? (decimal?)port : null;
+                this.HostnameBox.Text = settings.ListenHostname;
+            }
+            finally
+            {
+                this._launchOptionsInitializing = false;
+            }
+        }
+
+        /// <summary>
+        /// 监听地址提交(失焦 / 回车)。归一化后写设置,并把归一化结果回填回控件 ——
+        /// 填了非法字符(如带空格)会被当成"未设置"清空,当场可见。
+        /// <para>
+        /// 与端口一样,只影响**下次启动**服务:已在运行的进程不会因为改设置就换地址。
+        /// </para>
+        /// </summary>
+        private void OnHostnameCommit(object? sender, RoutedEventArgs e)
+        {
+            if (this._launchOptionsInitializing)
+            {
+                return;
+            }
+
+            var normalized = PiWebService.NormalizeHostname(this.HostnameBox.Text);
+            this.HostnameBox.Text = normalized;
+
+            if (SettingsService.Instance.Settings.ListenHostname == normalized)
+            {
+                return;
+            }
+
+            SettingsService.Instance.Update(s => s.ListenHostname = normalized);
+        }
+
+        private void OnHostnameKeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+        {
+            if (e.Key == Avalonia.Input.Key.Enter)
+            {
+                this.OnHostnameCommit(sender, e);
+            }
+        }
+
+        /// <summary>
+        /// 端口变更时写回设置。留空(null)记作 0 = 使用 pi 默认端口。
+        /// 数字合法性与 1-65535 范围由控件自身的 Minimum/Maximum/ClipValueToMinMax 保证，
+        /// 这里无需再解析文本。
+        /// </summary>
+        private void OnPortValueChanged(object? sender, NumericUpDownValueChangedEventArgs e)
+        {
+            if (this._launchOptionsInitializing)
+            {
+                return;
+            }
+
+            var value = this.PortBox.Value;
+            var port = 0;
+            if (value is decimal v && v >= MinPort && v <= MaxPort)
+            {
+                port = (int)v;
+            }
+
+            if (SettingsService.Instance.Settings.ListenPort == port)
+            {
+                return;
+            }
+
+            SettingsService.Instance.Update(s => s.ListenPort = port);
+        }
+
+        private void UpdateLog()
+        {
+            this.LogTextBlock.Text = this._service.LogText;
+            this.ScrollLogToEnd();
+        }
+
+        private void ScrollLogToEnd()
+        {
+            // 低优先级等布局完成后再滚到底部
+            Dispatcher.UIThread.Post(
+                () => this.LogScroll.ScrollToEnd(),
+                DispatcherPriority.Background);
+        }
+
+        // ---- 事件回调(可能来自后台线程,需调度到 UI 线程) ----
+
+        private void Service_LogAppended(string text)
+        {
+            // 注意:这里**不能**直接 LogTextBlock.Text += text(理由见 LogAppendThrottle),
+            // 只登记"待刷新",由节流器按固定间隔整段同步一次(文本内容从服务侧现取)。
+            if (Dispatcher.UIThread.CheckAccess())
+            {
+                this._logThrottle.Schedule();
+            }
+            else
+            {
+                // 事件通常在后台线程触发(stdout/stderr 回调)
+                Dispatcher.UIThread.Post(this._logThrottle.Schedule);
+            }
+        }
+
+        private void Service_StateChanged()
+        {
+            Dispatcher.UIThread.Post(async () =>
+            {
+                var running = this._service.IsRunning;
+                var wasRunning = this._wasRunning;
+                this._wasRunning = running;
+                this.UpdateButtons();
+
+                // 环境信息里的“运行状态/PID/运行时长”是动态的,状态一变就同步刷新
+                // (静态项已缓存,这里只是重新拼字符串,不起子进程)
+                if (this._environmentLoaded)
+                {
+                    this.EnvTextBlock.Text = this.BuildEnvironmentText();
+                }
+
+                // 服务从“运行中”变为已停止后,补一次更新检测(运行期间不检测)
+                if (wasRunning && !running && !this._service.IsInstalling)
+                {
+                    await this.RefreshStatusAsync();
+                }
+            });
+        }
+
+        /// <summary>启动后在观察期内意外退出(非用户手动停止),弹出错误提示。</summary>
+        private void Service_StartFailed()
+        {
+            Dispatcher.UIThread.Post(async () =>
+            {
+                await this.ShowStartFailedDialogAsync(this._service.LastStartError);
+            });
+        }
+
+        private void Service_LogsCleared()
+        {
+            Dispatcher.UIThread.Post(() => this.LogTextBlock.Text = string.Empty);
+        }
+
+        private void Service_WebUrlDetected(string url)
+        {
+            Dispatcher.UIThread.Post(this.UpdateButtons);
+        }
+
+        // ---- 按钮事件 ----
+
+        private async void OnInstallClick(object? sender, RoutedEventArgs e)
+        {
+            // npm 安装前先确认 Node.js 环境:缺失时弹窗引导去官网下载,不执行安装
+            if (!await this.EnsureNodeEnvironmentAsync())
+            {
+                return;
+            }
+
+            this.HeaderProgress.IsActive = true;
+            try
+            {
+                await this._service.InstallAsync();
+                await this.RefreshStatusAsync();
+            }
+            finally
+            {
+                this.HeaderProgress.IsActive = false;
+            }
+        }
+
+        /// <summary>更新到 npm 上的最新版本;完成后重新检查,按钮随之消失。</summary>
+        private async void OnUpdateClick(object? sender, RoutedEventArgs e)
+        {
+            // 更新同样是 npm install -g,装前一样要确认 Node.js 环境
+            if (!await this.EnsureNodeEnvironmentAsync())
+            {
+                return;
+            }
+
+            this.HeaderProgress.IsActive = true;
+            try
+            {
+                await this._service.UpdateAsync();
+                await this.RefreshStatusAsync();
+            }
+            finally
+            {
+                this.HeaderProgress.IsActive = false;
+            }
+        }
+
+        /// <summary>
+        /// npm 安装(pi)前的 Node.js 环境检查:缺失时弹「前往官网下载 / 确定」弹窗并返回 false,不执行安装。
+        /// </summary>
+        private async Task<bool> EnsureNodeEnvironmentAsync()
+        {
+            this.HeaderProgress.IsActive = true;
+            bool ok;
+            try
+            {
+                ok = await this._service.HasNodeEnvironmentAsync();
+            }
+            finally
+            {
+                this.HeaderProgress.IsActive = false;
+            }
+
+            if (!ok)
+            {
+                await this.ShowNodeMissingDialogAsync();
+            }
+
+            return ok;
+        }
+
+        /// <summary>
+        /// 未检测到 Node.js 环境时的提示弹窗:「前往官网下载」在浏览器打开 Node.js 官网下载页,
+        /// 「确定」只关闭弹窗。两个按钮都会关闭弹窗(内容对话框的按钮行为),区别只是要不要顺带开浏览器。
+        /// </summary>
+        private async Task ShowNodeMissingDialogAsync()
+        {
+            // 内容对话框同时只能打开一个,防重入
+            if (this._nodeMissingDialogOpen)
+            {
+                return;
+            }
+
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel is not Window ownerWindow)
+            {
+                return;
+            }
+
+            this._nodeMissingDialogOpen = true;
+            try
+            {
+                var dialog = new FAContentDialog
+                {
+                    Title = "未检测到 Node.js 环境",
+                    Content = new SelectableTextBlock
+                    {
+                        Text = "安装 @agegr/pi-web 需要 Node.js(自带 npm)。当前电脑上未检测到可用的 Node.js 环境,"
+                            + "请先前往 Node.js 官网下载安装,完成后再回来重试安装。",
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    PrimaryButtonText = "前往官网下载",
+                    CloseButtonText = "确定",
+                };
+
+                var result = await dialog.ShowAsync(ownerWindow);
+                if (result == FAContentDialogResult.Primary)
+                {
+                    BrowserLauncher.OpenInBrowser(NodeDownloadUrl);
+                }
+            }
+            catch (Exception)
+            {
+                // 极端情况下(如页面正在卸载)ShowAsync 可能抛异常,忽略以免崩溃
+            }
+            finally
+            {
+                this._nodeMissingDialogOpen = false;
+            }
+        }
+
+        private async void OnRunClick(object? sender, RoutedEventArgs e)
+        {
+            var ok = await this._service.StartAsync();
+            if (!ok)
+            {
+                await this.ShowStartFailedDialogAsync(this._service.LastStartError);
+            }
+        }
+
+        /// <summary>启动失败时弹出提示窗口;“复制信息”把完整错误写入剪贴板,“确定”关闭。</summary>
+        private async Task ShowStartFailedDialogAsync(string error)
+        {
+            // 内容对话框同时只能打开一个:失败事件可能与手动点击并发,互斥防重入
+            if (this._startFailedDialogOpen)
+            {
+                return;
+            }
+
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel is not Window ownerWindow)
+            {
+                return;
+            }
+
+            this._startFailedDialogOpen = true;
+            try
+            {
+                // 弹窗内只简要显示前几百字符,完整信息可通过“复制信息”获取
+                const int PreviewLength = 600;
+                var preview = error.Length > PreviewLength
+                    ? error[..PreviewLength] + "\n..."
+                    : error;
+
+                var dialog = new FAContentDialog
+                {
+                    Title = "启动失败",
+                    Content = new ScrollViewer
+                    {
+                        MaxHeight = 240,
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        Content = new SelectableTextBlock
+                        {
+                            Text = preview,
+                            TextWrapping = TextWrapping.Wrap,
+                            FontFamily = new Avalonia.Media.FontFamily("Consolas"),
+                            FontSize = 12,
+                        },
+                    },
+                    PrimaryButtonText = "复制信息",
+                    CloseButtonText = "确定",
+                };
+
+                var result = await dialog.ShowAsync(ownerWindow);
+                if (result == FAContentDialogResult.Primary)
+                {
+                    try
+                    {
+                        var clipboard = topLevel.Clipboard;
+                        if (clipboard is not null)
+                        {
+                            var transfer = new Avalonia.Input.DataTransfer();
+                            transfer.Add(Avalonia.Input.DataTransferItem.CreateText(error));
+                            await clipboard.SetDataAsync(transfer);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // 剪贴板不可用时忽略
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // 极端情况下(如页面正在卸载)ShowAsync 可能抛异常,忽略以免崩溃
+            }
+            finally
+            {
+                this._startFailedDialogOpen = false;
+            }
+        }
+
+        private void OnStopClick(object? sender, RoutedEventArgs e)
+        {
+            this._service.Stop();
+        }
+
+        private async void OnRestartClick(object? sender, RoutedEventArgs e)
+        {
+            var ok = await this._service.RestartAsync();
+            if (!ok)
+            {
+                await this.ShowStartFailedDialogAsync(this._service.LastStartError);
+            }
+        }
+
+        /// <summary>在应用内 WebView 窗口中打开 Web 端对话页面。</summary>
+        private void OnOpenInWebViewClick(object? sender, RoutedEventArgs e)
+        {
+            if (this._service.WebUrl is string url)
+            {
+                WebOpener.OpenInWebView(url);
+            }
+        }
+
+        /// <summary>在系统默认浏览器中打开 Web 端对话页面。</summary>
+        private void OnOpenInBrowserClick(object? sender, RoutedEventArgs e)
+        {
+            if (this._service.WebUrl is string url)
+            {
+                BrowserLauncher.OpenInBrowser(url);
+            }
+        }
+
+        // ---- 复制与日志工具 ----
+
+        /// <summary>复制含 token 的完整 Web 地址。</summary>
+        private async void OnCopyWebUrlClick(object? sender, RoutedEventArgs e)
+        {
+            if (this._service.WebUrl is not string url)
+            {
+                return;
+            }
+
+            await this._webUrlCopy.CopyAsync(this, url);
+        }
+
+        /// <summary>复制日志面板中的全部内容。</summary>
+        private async void OnCopyLogClick(object? sender, RoutedEventArgs e)
+        {
+            await this._logCopy.CopyAsync(this, this._service.LogText);
+        }
+
+        /// <summary>清空日志面板(仅面板;app.log 文件不受影响)。</summary>
+        private void OnClearLogClick(object? sender, RoutedEventArgs e) => this._service.ClearLog();
+
+        /// <summary>
+        /// 在系统文件管理器中定位 app.log。面板里只有 pi 的 stdio,
+        /// 而 app.log 还包含面板里没有的记录:设置加载、版本检查、WebView 生命周期、启动失败详情。
+        /// Windows 用 explorer /select,macOS 用 open -R(见 <see cref="PlatformProcess"/>)。
+        /// </summary>
+        private void OnOpenLogFileClick(object? sender, RoutedEventArgs e)
+        {
+            try
+            {
+                // 先写一行,确保文件存在——否则“在文件夹中显示”无处可选中
+                AppLogService.Write("[应用] 用户请求打开日志文件");
+                Process.Start(PlatformProcess.CreateRevealInFileManagerStartInfo(AppLogService.LogFilePath));
+            }
+            catch (Exception ex)
+            {
+                AppLogService.Write($"[应用] 打开日志文件失败: {ex.Message}");
+            }
+        }
+
+        // ---- 环境与详情 ----
+
+        /// <summary>
+        /// 查询环境信息(Node/npm 版本、pi 路径)。首次需起子进程(约 1 秒),之后用缓存;
+        /// 刷新时只重新拼字符串,供页面加载与状态变化共用。
+        /// </summary>
+        private async Task EnsureEnvironmentLoadedAsync()
+        {
+            if (this._environmentLoaded)
+            {
+                this.EnvTextBlock.Text = this.BuildEnvironmentText();
+                return;
+            }
+
+            this.EnvProgress.IsActive = true;
+            try
+            {
+                var (node, npm, piPath, piWebPath) = await this._service.GetEnvironmentInfoAsync();
+                this._envNode = node;
+                this._envNpm = npm;
+                this._envPiPath = piPath;
+                this._envPiWebPath = piWebPath;
+                this._environmentLoaded = true;
+            }
+            finally
+            {
+                this.EnvProgress.IsActive = false;
+            }
+
+            this.EnvTextBlock.Text = this.BuildEnvironmentText();
+        }
+
+        /// <summary>拼出便于阅读与粘贴的环境信息文本。</summary>
+        private string BuildEnvironmentText()
+        {
+            var service = this._service;
+
+            string state;
+            if (!service.IsRunning)
+            {
+                state = "已停止";
+            }
+            else
+            {
+                // 用“启动时刻”而非“已运行时长”——后者会随时间变陈旧(本面板只在状态变化时刷新)
+                var parts = new List<string>();
+                if (service.ProcessId is int pid)
+                {
+                    parts.Add($"PID {pid}");
+                }
+                if (service.StartedAtLocal is DateTime startedAt)
+                {
+                    parts.Add($"启动于 {startedAt:HH:mm:ss}");
+                }
+
+                state = parts.Count > 0 ? $"运行中 ({string.Join("，", parts)})" : "运行中";
+            }
+
+            var appVersion = typeof(HomePageControl).Assembly.GetName().Version?.ToString() ?? "未知";
+            var settings = SettingsService.Instance.Settings;
+            var configuredUrl = PiWebService.BuildWebUrl(settings.ListenHostname, settings.ListenPort);
+
+            var lines = new[]
+            {
+                $"运行状态 : {state}",
+                $"应用版本 : {appVersion}",
+                $"安装版本 : {(service.InstalledVersion is string iv ? "v" + iv : "未安装")}",
+                $"Web 地址 : {(service.IsRunning ? service.WebUrl ?? configuredUrl + "(尚未就绪)" : configuredUrl)}",
+                $"Node.js  : {this._envNode ?? "未知"}",
+                $"npm      : {this._envNpm ?? "未知"}",
+                $"pi 路径  : {this._envPiPath ?? "未找到"}",
+                $"pi-web 路径 : {this._envPiWebPath ?? "未找到"}",
+                $"pi 数据目录 : {PiWebService.ResolveAgentDirectory()}",
+                $"{WebOpener.EngineDisplayName} : {WebOpener.DescribeWebViewRuntime()}",
+            };
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        /// <summary>复制环境信息。</summary>
+        private async void OnCopyEnvClick(object? sender, RoutedEventArgs e)
+            => await this._envCopy.CopyAsync(this, this.BuildEnvironmentText());
+    }
+}

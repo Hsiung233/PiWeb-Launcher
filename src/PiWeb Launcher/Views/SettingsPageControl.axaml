@@ -1,0 +1,407 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="using:FluentAvalonia.UI.Controls"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="640"
+             x:Class="PiWeb_Launcher.Views.SettingsPageControl">
+
+    <!-- 页面样式:设置行是高度重复的结构(左说明 + 右控件),统一在这里定义,
+         避免每一行都重复写字号/次级色/间距 -->
+    <UserControl.Styles>
+        <!-- 设置行:说明占剩余宽度、控件靠右;24 的列距保证窄窗口下两者不会贴在一起 -->
+        <Style Selector="Grid.settingRow">
+            <Setter Property="ColumnSpacing" Value="24"/>
+        </Style>
+        <Style Selector="TextBlock.rowTitle">
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <!-- 说明文字:12px + 次级色(原来是内联 FontSize + Opacity,换主题时对比度不稳) -->
+        <Style Selector="TextBlock.rowDesc">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}"/>
+        </Style>
+        <!-- 行分隔线:用卡片描边色,浅色/深色主题下都足够淡 -->
+        <Style Selector="Border.rowSeparator">
+            <Setter Property="Height" Value="1"/>
+            <Setter Property="Margin" Value="0 12"/>
+            <Setter Property="Background" Value="{DynamicResource CardStrokeColorDefaultBrush}"/>
+        </Style>
+        <!-- 卡片外观(Border.card)统一定义在 App.axaml,与首页/包页面共用同一份 -->
+        <Style Selector="StackPanel.sectionHeader">
+            <Setter Property="Orientation" Value="Horizontal"/>
+            <Setter Property="Spacing" Value="8"/>
+        </Style>
+        <Style Selector="ui|FASymbolIcon.sectionIcon">
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <!-- 内容超出可视高度时可滚动:窗口高度不足时否则会直接裁掉底部的设置项 -->
+    <ScrollViewer x:Name="SettingsScroll"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24 20 24 24" Spacing="12">
+
+            <!-- ① 服务:应用启动时的初始行为 -->
+            <Border Classes="card">
+                <StackPanel>
+                    <StackPanel Classes="sectionHeader">
+                        <ui:FASymbolIcon Classes="sectionIcon" Symbol="Play"/>
+                        <TextBlock Text="服务"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock Classes="rowDesc"
+                               Margin="24 4 0 12"
+                               Text="应用启动时的初始行为,以及重复启动时已有实例的响应"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="开机自启动"/>
+                            <TextBlock Classes="rowDesc" Text="登录系统后自动启动启动器(按当前用户写入系统自启动项,不需要管理员权限);这样启动时不弹主界面,直接收进系统托盘"/>
+                            <TextBlock x:Name="AutoStartStateText"
+                                       Classes="rowDesc"
+                                       Margin="0 2 0 0"
+                                       Text="系统自启动项:未注册"/>
+                        </StackPanel>
+                        <ToggleSwitch x:Name="AutoStartSwitch"
+                                      Grid.Column="1"
+                                      VerticalAlignment="Center"
+                                      IsCheckedChanged="OnAutoStartChanged"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="启动时打开主界面"/>
+                            <TextBlock Classes="rowDesc" Text="应用启动后直接显示主窗口;关闭时收进系统托盘"/>
+                        </StackPanel>
+                        <ToggleSwitch x:Name="ShowMainWindowOnStartupSwitch"
+                                      Grid.Column="1"
+                                      VerticalAlignment="Center"
+                                      IsCheckedChanged="OnShowMainWindowOnStartupChanged"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="重复启动应用时"/>
+                            <TextBlock Classes="rowDesc" Text="已有实例在运行时,再次启动启动器要执行的动作;选 WebView / 浏览器但 Pi Web 服务未运行时改为打开主界面"/>
+                        </StackPanel>
+                        <ComboBox x:Name="RepeatLaunchCombo"
+                                  Grid.Column="1"
+                                  Width="180"
+                                  VerticalAlignment="Center"
+                                  SelectionChanged="OnRepeatLaunchChanged">
+                            <ComboBoxItem Content="无动作"/>
+                            <ComboBoxItem Content="打开主界面"/>
+                            <ComboBoxItem Content="打开WebView"/>
+                            <ComboBoxItem Content="打开浏览器"/>
+                        </ComboBox>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="启动时运行 Pi Web 服务"/>
+                            <TextBlock Classes="rowDesc" Text="应用启动后自动运行 pi-web(需已安装 @agegr/pi-web)"/>
+                        </StackPanel>
+                        <ToggleSwitch x:Name="RunServiceOnStartupSwitch"
+                                      Grid.Column="1"
+                                      VerticalAlignment="Center"
+                                      IsCheckedChanged="OnRunServiceOnStartupChanged"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="启动 Pi Web 服务后"/>
+                            <TextBlock Classes="rowDesc" Text="服务启动并解析出 Web 地址后自动执行的动作"/>
+                        </StackPanel>
+                        <ComboBox x:Name="AfterServiceStartedCombo"
+                                  Grid.Column="1"
+                                  Width="180"
+                                  VerticalAlignment="Center"
+                                  SelectionChanged="OnAfterServiceStartedChanged">
+                            <ComboBoxItem Content="无动作"/>
+                            <ComboBoxItem Content="打开WebView"/>
+                            <ComboBoxItem Content="打开浏览器"/>
+                        </ComboBox>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="监听地址"/>
+                            <TextBlock Classes="rowDesc" Text="留空则使用 pi-web 默认的 127.0.0.1(仅本机可访问)。填 0.0.0.0 或局域网地址会把一个能读写本机文件的 Agent 暴露到网络上 —— 请同时配置下面的登录密码"/>
+                            <TextBlock x:Name="ListenUrlText"
+                                       Classes="rowDesc"
+                                       Margin="0 2 0 0"
+                                       Text="当前:http://127.0.0.1:30141"/>
+                        </StackPanel>
+                        <TextBox x:Name="ListenHostnameBox"
+                                 Grid.Column="1"
+                                 Classes="clearButton"
+                                 Width="214"
+                                 VerticalAlignment="Center"
+                                 PlaceholderText="127.0.0.1"
+                                 LostFocus="OnListenHostnameLostFocus"
+                                 KeyDown="OnListenHostnameKeyDown"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="Web 登录密码"/>
+                            <TextBlock Classes="rowDesc" Text="对应 pi-web 的 PI_WEB_PASSWORD:启用后浏览器需要密码登录,API 客户端用用户名 pi 的 Basic Auth。留空 = 不启用认证。密码以明文保存在本机设置文件里(与其他本机凭据同一权限边界),仅监听回环地址时无需开启"/>
+                        </StackPanel>
+                        <TextBox x:Name="WebPasswordBox"
+                                 Grid.Column="1"
+                                 Classes="clearButton"
+                                 Width="214"
+                                 VerticalAlignment="Center"
+                                 PasswordChar="●"
+                                 PlaceholderText="不启用认证"
+                                 TextChanged="OnWebPasswordTextChanged"
+                                 LostFocus="OnWebPasswordLostFocus"
+                                 KeyDown="OnWebPasswordKeyDown"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="允许服务自己打开浏览器"/>
+                            <TextBlock Classes="rowDesc" Text="默认关闭(启动器会给 pi-web 传 --no-open):启动器本身就是那个界面,不该再弹一个系统浏览器窗口。仅当你希望服务就绪时浏览器自动弹出时才开启"/>
+                        </StackPanel>
+                        <ToggleSwitch x:Name="LetServiceOpenBrowserSwitch"
+                                      Grid.Column="1"
+                                      VerticalAlignment="Center"
+                                      IsCheckedChanged="OnLetServiceOpenBrowserChanged"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- ② 环境:npm 源与网络代理(只作用于启动器自己发起的命令/下载,不改用户的 .npmrc) -->
+            <Border Classes="card">
+                <StackPanel>
+                    <StackPanel Classes="sectionHeader">
+                        <ui:FASymbolIcon Classes="sectionIcon" Symbol="Setting"/>
+                        <TextBlock Text="环境"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock Classes="rowDesc"
+                               Margin="24 4 0 12"
+                               Text="npm 源与网络代理:作用于启动器发起的 npm 命令与 pi 包目录下载,不修改用户自己的 .npmrc;服务进程只注入代理(不注入 npm 源)"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="npm 源"/>
+                            <TextBlock Classes="rowDesc" Text="“使用配置源”= 沿用本机 .npmrc 与环境变量;其余选项会把地址注入子进程,对 pi-web 与 pi 的安装/更新、以及 pi 包安装同时生效"/>
+                            <TextBlock x:Name="NpmRegistryUrlText"
+                                       Classes="rowDesc"
+                                       Margin="0 2 0 0"
+                                       Text="当前:使用配置源"/>
+                        </StackPanel>
+                        <ComboBox x:Name="NpmRegistryCombo"
+                                  Grid.Column="1"
+                                  Width="180"
+                                  VerticalAlignment="Center"
+                                  SelectionChanged="OnNpmRegistryChanged">
+                            <ComboBoxItem Content="使用配置源"/>
+                            <ComboBoxItem Content="npm 官方"/>
+                            <ComboBoxItem Content="npmmirror(淘宝)"/>
+                            <ComboBoxItem Content="腾讯云"/>
+                            <ComboBoxItem Content="华为云"/>
+                        </ComboBox>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="代理地址"/>
+                            <TextBlock Classes="rowDesc" Text="如 http://127.0.0.1:7890(可省略 http://);留空则不使用代理。立即生效,已在运行的 pi 服务不受影响"/>
+                        </StackPanel>
+                        <!-- 「x」用 TextBox 自带的 clearButton 类;宽度 +34 是为了补回按钮占掉的文字空间,
+                             否则 http://127.0.0.1:7890 这种常见地址会被挤成滚动显示 -->
+                        <TextBox x:Name="ProxyUrlBox"
+                                 Grid.Column="1"
+                                 Classes="clearButton"
+                                 Width="214"
+                                 VerticalAlignment="Center"
+                                 PlaceholderText="不使用代理"
+                                 TextChanged="OnProxyUrlTextChanged"
+                                 LostFocus="OnEnvironmentInputLostFocus"
+                                 KeyDown="OnEnvironmentInputKeyDown"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <!-- 从属行:只有填了代理才有意义,代理为空时整行禁用(左侧强调色竖线表示从属关系) -->
+                    <Border x:Name="NoProxyPanel"
+                            BorderBrush="{DynamicResource AccentFillColorDefaultBrush}"
+                            BorderThickness="2,0,0,0"
+                            Padding="12 0 0 0">
+                        <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Classes="rowTitle" Text="不走代理的地址"/>
+                                <TextBlock Classes="rowDesc" Text="逗号分隔的主机名或域名后缀,如 localhost,127.0.0.1,.corp.com;留空则全部走代理"/>
+                            </StackPanel>
+                            <TextBox x:Name="NoProxyBox"
+                                     Grid.Column="1"
+                                     Classes="clearButton"
+                                     Width="214"
+                                     VerticalAlignment="Center"
+                                     PlaceholderText="可选"
+                                     TextChanged="OnNoProxyTextChanged"
+                                     LostFocus="OnEnvironmentInputLostFocus"
+                                     KeyDown="OnEnvironmentInputKeyDown"/>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </Border>
+
+            <!-- ③ 系统托盘:点击托盘图标的响应方式 -->
+            <Border Classes="card">
+                <StackPanel>
+                    <StackPanel Classes="sectionHeader">
+                        <ui:FASymbolIcon Classes="sectionIcon" Symbol="Pin"/>
+                        <TextBlock Text="系统托盘"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock Classes="rowDesc"
+                               Margin="24 4 0 12"
+                               Text="点击托盘图标时的响应方式"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0"
+                                   Classes="rowTitle"
+                                   VerticalAlignment="Center"
+                                   Text="单击托盘图标"/>
+                        <ComboBox x:Name="TraySingleClickCombo"
+                                  Grid.Column="1"
+                                  Width="180"
+                                  VerticalAlignment="Center"
+                                  SelectionChanged="OnTraySingleClickChanged">
+                            <ComboBoxItem Content="无动作"/>
+                            <ComboBoxItem Content="在WebView中打开"/>
+                            <ComboBoxItem Content="在浏览器中打开"/>
+                            <ComboBoxItem Content="打开界面"/>
+                        </ComboBox>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0"
+                                   Classes="rowTitle"
+                                   VerticalAlignment="Center"
+                                   Text="双击托盘图标"/>
+                        <ComboBox x:Name="TrayDoubleClickCombo"
+                                  Grid.Column="1"
+                                  Width="180"
+                                  VerticalAlignment="Center"
+                                  SelectionChanged="OnTrayDoubleClickChanged">
+                            <ComboBoxItem Content="无动作"/>
+                            <ComboBoxItem Content="在WebView中打开"/>
+                            <ComboBoxItem Content="在浏览器中打开"/>
+                            <ComboBoxItem Content="打开界面"/>
+                        </ComboBox>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- ④ WebView:应用内浏览器窗口的打开方式与内存释放 -->
+            <Border Classes="card">
+                <StackPanel>
+                    <StackPanel Classes="sectionHeader">
+                        <ui:FASymbolIcon Classes="sectionIcon" Symbol="Globe"/>
+                        <TextBlock Text="WebView"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <TextBlock Classes="rowDesc"
+                               Margin="24 4 0 12"
+                               Text="应用内浏览器窗口的打开方式与内存释放"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="WebView 内打开链接"/>
+                            <TextBlock Classes="rowDesc" Text="在应用内 WebView 里点击链接(或页面请求新窗口)时用哪种方式打开"/>
+                        </StackPanel>
+                        <ComboBox x:Name="WebViewLinkCombo"
+                                  Grid.Column="1"
+                                  Width="180"
+                                  VerticalAlignment="Center"
+                                  SelectionChanged="OnWebViewLinkChanged">
+                            <ComboBoxItem Content="系统浏览器"/>
+                            <ComboBoxItem Content="在WebView中打开"/>
+                        </ComboBox>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <Grid Classes="settingRow" ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Classes="rowTitle" Text="保留 WebView 窗口"/>
+                            <TextBlock Classes="rowDesc" Text="关闭窗口时只隐藏,下次打开无需重新加载;会持续占用 WebView 引擎内存。关闭则关闭即释放"/>
+                        </StackPanel>
+                        <ToggleSwitch x:Name="KeepWebViewAliveSwitch"
+                                      Grid.Column="1"
+                                      VerticalAlignment="Center"
+                                      IsCheckedChanged="OnKeepWebViewAliveChanged"/>
+                    </Grid>
+
+                    <Border Classes="rowSeparator"/>
+
+                    <!-- 依赖“保留 WebView 窗口”:开关关闭时整行禁用,左侧强调色竖线表示从属关系
+                         (卡片描边色太淡、几乎看不出缩进,这里用强调色) -->
+                    <Border BorderBrush="{DynamicResource AccentFillColorDefaultBrush}"
+                            BorderThickness="2,0,0,0"
+                            Padding="12 0 0 0">
+                        <Grid x:Name="WebViewIdleTimeoutPanel"
+                              Classes="settingRow"
+                              ColumnDefinitions="*,Auto">
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Classes="rowTitle" Text="保留超时（分钟）"/>
+                                <TextBlock Classes="rowDesc" Text="隐藏超过该时长后自动关闭并释放 WebView 引擎内存;留空使用默认 5 分钟"/>
+                            </StackPanel>
+                            <NumericUpDown x:Name="WebViewIdleTimeoutBox"
+                                           Grid.Column="1"
+                                           Width="120"
+                                           VerticalAlignment="Center"
+                                           Minimum="1"
+                                           Maximum="1440"
+                                           Increment="1"
+                                           ClipValueToMinMax="True"
+                                           ParsingNumberStyle="None"
+                                           PlaceholderText="5"
+                                           ShowButtonSpinner="False"
+                                           AllowSpin="False"
+                                           ValueChanged="OnWebViewIdleTimeoutChanged"
+                                           ToolTip.Tip="1-1440 分钟;留空则使用默认 5 分钟"/>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
