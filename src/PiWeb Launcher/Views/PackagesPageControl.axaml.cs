@@ -59,6 +59,16 @@ namespace PiWeb_Launcher.Views
         /// <summary>装卸操作的输出全文(服务只把新行推过来,这里自己累积)。</summary>
         private readonly System.Text.StringBuilder _operationLog = new();
 
+        /// <summary>更新检查是否进行中(与服务的忙碌状态共同决定按钮可用性)。</summary>
+        private bool _checkingUpdates;
+
+        /// <summary>
+        /// 最近一次检查更新的结果(包名 → registry 最新版;null = 查不到)。
+        /// 列表刷新会重建条目对象,结果存在页面级别、每次刷新后重新套用,
+        /// 这样「检查更新 → 装卸/刷新列表」之后徽标不会丢。
+        /// </summary>
+        private Dictionary<string, string?> _latestVersions = new(StringComparer.Ordinal);
+
         public PackagesPageControl()
         {
             InitializeComponent();
@@ -279,6 +289,10 @@ namespace PiWeb_Launcher.Views
 
             this.InstalledList.ItemsSource = this._installedView;
 
+            // 把最近一次检查更新的结果套到新条目上(徽标不因刷新/装卸而丢);
+            // 顺手做在快照对象上(视图只是它的筛选子集),保证筛选后也能看到徽标
+            this.ApplyLatestVersions();
+
             var total = all.Count;
             var shown = this._installedView.Count;
             this.InstalledCountText.Text = filter.Length == 0
@@ -293,6 +307,19 @@ namespace PiWeb_Launcher.Views
             this.InstalledEmptyText.IsVisible = empty;
 
             this.UpdateAllButton.IsEnabled = total > 0 && !this._packages.IsBusy;
+            this.CheckUpdatesButton.IsEnabled = total > 0 && !this._packages.IsBusy && !this._checkingUpdates;
+        }
+
+        /// <summary>把缓存的检查结果回填到快照条目上;结果里有值的包会经变更通知点亮行内徽标。</summary>
+        private void ApplyLatestVersions()
+        {
+            foreach (var entry in this._packages.Installed.Installed)
+            {
+                if (this._latestVersions.TryGetValue(entry.Name, out var latest))
+                {
+                    entry.LatestVersion = latest;
+                }
+            }
         }
 
         /// <summary>正在观察的已安装条目(用于刷新时退订,避免旧对象继续往界面推通知)。</summary>
@@ -367,6 +394,98 @@ namespace PiWeb_Launcher.Views
         {
             this.ShowOperationLog();
             await this._packages.UpdateAllAsync();
+        }
+
+        // ---- 更新检测 ----
+
+        private async void OnCheckUpdatesClick(object? sender, RoutedEventArgs e)
+            => await this.CheckUpdatesAsync();
+
+        /// <summary>
+        /// 检查更新:逐个查询已安装 npm 包在 registry 上的最新版本并回填条目(徽标经变更通知点亮)。
+        /// 只查 npm 来源;git/本地源的包没有 registry 版本,查了也是白跑一个进程。
+        /// </summary>
+        private async Task CheckUpdatesAsync()
+        {
+            if (this._checkingUpdates || this._packages.IsBusy)
+            {
+                return;
+            }
+
+            var packages = this._packages.Installed.Installed
+                .Where(entry => entry.Kind == PackageSourceKind.Npm && entry.Version is { Length: > 0 })
+                .Select(entry => entry.Name)
+                .ToList();
+
+            if (packages.Count == 0)
+            {
+                this.ShowUpdateCheckStatus("没有可检查的 npm 包(git/本地源的包没有 registry 版本)。");
+                return;
+            }
+
+            this._checkingUpdates = true;
+            this.UpdateInstalledView();
+            this.ShowUpdateCheckStatus($"正在检查更新(0/{packages.Count})…");
+            try
+            {
+                var latest = await this._packages.FetchLatestVersionsAsync(packages, (done, total) =>
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (this._checkingUpdates)
+                        {
+                            this.ShowUpdateCheckStatus($"正在检查更新({done}/{total})…");
+                        }
+                    }));
+
+                this._latestVersions = latest;
+                this.ApplyLatestVersions();
+
+                var updatable = this._packages.Installed.Installed
+                    .Where(entry => entry.IsUpdateAvailable)
+                    .Select(entry => entry.Name)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count();
+                this.ShowUpdateCheckStatus(updatable == 0
+                    ? "检查完成:全部已是最新。"
+                    : $"检查完成:{updatable} 个包可更新,可逐个「更新」或「全部更新」。");
+            }
+            catch (Exception ex)
+            {
+                this.ShowUpdateCheckStatus($"检查更新失败: {ex.Message}");
+            }
+            finally
+            {
+                this._checkingUpdates = false;
+                this.UpdateInstalledView();
+            }
+        }
+
+        private void ShowUpdateCheckStatus(string text)
+        {
+            this.UpdateCheckStatusText.Text = text;
+            this.UpdateCheckStatusText.IsVisible = text.Length > 0;
+        }
+
+        /// <summary>
+        /// 单包更新:对 npm 来源的包**重跑一次安装** —— 安装规格不带版本号(<c>npm:&lt;包名&gt;</c>),
+        /// pi 每次都装 registry 上的最新版,所以"再装一遍"就是"更新到最新"。
+        /// git/本地来源的包不开放该按钮(见 <see cref="PiInstalledPackage.CanUpdate"/>)。
+        /// </summary>
+        private async void OnUpdatePackageClick(object? sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { DataContext: PiInstalledPackage entry }
+                || !entry.CanUpdate
+                || this._packages.IsBusy)
+            {
+                return;
+            }
+
+            this.ShowOperationLog();
+            var ok = await this._packages.InstallAsync(entry.Source);
+            if (ok && this._service.IsRunning)
+            {
+                await this.AskRestartAsync($"已更新 {entry.Name}。运行中的 Pi Web 服务要重启后才会加载新版本。");
+            }
         }
 
         // ---- 目录 ----
@@ -641,6 +760,7 @@ namespace PiWeb_Launcher.Views
                 var busy = this._packages.IsBusy;
                 this.OperationProgress.IsActive = busy;
                 this.UpdateAllButton.IsEnabled = !busy && this._packages.Installed.Installed.Count > 0;
+                this.CheckUpdatesButton.IsEnabled = !busy && this._packages.Installed.Installed.Count > 0 && !this._checkingUpdates;
                 this.RefreshInstalledButton.IsEnabled = !busy;
                 this.InstalledProgress.IsActive = busy;
 

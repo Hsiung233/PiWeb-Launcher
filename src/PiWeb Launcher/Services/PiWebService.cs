@@ -72,6 +72,16 @@ namespace PiWeb_Launcher.Services
         private bool _startFailureHandled;
         private volatile bool _readyReported;
 
+        /// <summary>
+        /// 运行世代号:每一次**用户发起**的启动/停止都会递增。
+        /// 看门狗安排延迟重启时记下当时世代号,到点后发现世代号变了就放弃 ——
+        /// 这是取消挂起重启的唯一机制:用户在等待期间按了停止/手动启动/退出,不该再被"补一炮"。
+        /// </summary>
+        private int _watchdogGeneration;
+
+        /// <summary>已用掉的连续自动重启次数(判定规则见 <see cref="WatchdogPolicy"/>)。</summary>
+        private int _watchdogRestartsUsed;
+
         /// <summary>是否已有一次 <see cref="StartAsync"/> 在途(见 <see cref="IsStartInFlight"/>)。</summary>
         private volatile bool _startInFlight;
 
@@ -89,6 +99,18 @@ namespace PiWeb_Launcher.Services
         /// 判定与"用户点了停止"分开记:后者是正常路径,弹窗就成了噪音。
         /// </summary>
         public event Action? StartFailed;
+
+        /// <summary>
+        /// 稳定运行(超过启动失败观察期)后的意外退出(崩溃/被误杀,非用户主动停止),
+        /// 参数为本次运行时长。启动器用它发送系统通知/安排看门狗重启。
+        /// </summary>
+        public event Action<TimeSpan>? UnexpectedExit;
+
+        /// <summary>看门狗已安排自动重启:(第 attempt 次,共 max 次,延迟 delay)。仅在开启看门狗时触发。</summary>
+        public event Action<int, int, TimeSpan>? AutoRestartScheduled;
+
+        /// <summary>看门狗连续 <see cref="WatchdogPolicy.MaxRestarts"/> 次自动重启后仍退出,放弃并通知。</summary>
+        public event Action<int>? AutoRestartGaveUp;
 
         /// <summary>有新日志时触发(<c>detectWebUrl</c> 只在进程输出时为 true)。</summary>
         public event Action<string>? LogAppended;
@@ -557,8 +579,20 @@ namespace PiWeb_Launcher.Services
         /// 的并发调用(托盘连点、自启动与手动点击撞车)会拉起两个服务进程。
         /// </para>
         /// </summary>
-        public async Task<bool> StartAsync()
+        /// <param name="watchdogRestart">
+        /// true = 本次启动是看门狗自动重启:不递增运行世代号、不清零重启计数
+        /// (否则会把自己刚安排的这次重启"取消"掉)。用户/界面发起的启动一律默认 false。
+        /// </param>
+        public async Task<bool> StartAsync(bool watchdogRestart = false)
         {
+            if (!watchdogRestart)
+            {
+                // 用户发起的启动:递增世代号以取消任何挂着的看门狗重启,并把重启计数归零
+                // (用户亲自处理过一次,就当额度重新计)
+                this._watchdogGeneration++;
+                this._watchdogRestartsUsed = 0;
+            }
+
             if (this.IsRunning || this._startInFlight)
             {
                 return true;
@@ -669,13 +703,28 @@ namespace PiWeb_Launcher.Services
             }
         }
 
-        /// <summary>进程退出:清状态、通知界面,并在非用户主动停止时给出失败提示。</summary>
+        /// <summary>
+        /// 启动失败观察期:进程启动后在该窗口内退出(非用户停止)按"启动失败"处理;
+        /// 超过窗口后才退出的属于"稳定运行后的意外退出"(系统通知 + 可选看门狗自动重启)。
+        /// <para>
+        /// 为什么要分:启动失败(参数错、端口被占、包损坏)重试大概率还是失败,不该进看门狗循环;
+        /// 而稳定运行后的崩溃(被误杀、依赖损坏)自动拉起来通常就能恢复。
+        /// </para>
+        /// </summary>
+        private static readonly TimeSpan LateExitFailureWindow = TimeSpan.FromSeconds(15);
+
+        /// <summary>进程退出:清状态、通知界面;非用户主动停止时按退出时机分流处理。</summary>
         private void OnProcessExited(Process process)
         {
             if (!ReferenceEquals(this._process, process))
             {
                 return;
             }
+
+            // 运行时长要在清状态前算好:_startTimeUtc 马上会被复位
+            var ranFor = this._startTimeUtc != DateTime.MinValue
+                ? DateTime.UtcNow - this._startTimeUtc
+                : TimeSpan.Zero;
 
             this._process = null;
             this.WebUrl = null;
@@ -685,22 +734,103 @@ namespace PiWeb_Launcher.Services
             {
                 this.AppendLog("[服务] 已停止。\r\n");
             }
+            else if (ranFor < LateExitFailureWindow)
+            {
+                // 观察期内退出 = 没能启动起来:走启动失败路径(留证 + StartFailed 弹窗/通知)
+                this.TryRecordStartFailure(process);
+            }
             else
             {
-                this.TryRecordStartFailure(process);
+                // 稳定运行后的崩溃/被误杀:留证同启动失败,但界面提示与自动恢复交给
+                // UnexpectedExit(系统通知)与看门狗,不再弹启动失败的框
+                this.HandleUnexpectedExit(ranFor, process);
             }
 
             StateChanged?.Invoke();
         }
 
         /// <summary>
-        /// 记录一次非用户主动的退出(启动失败或中途崩溃)。
+        /// 稳定运行后的意外退出处理:留证、触发 <see cref="UnexpectedExit"/>,并按设置安排看门狗自动重启。
+        /// <para>
+        /// 延迟重启的实现要点:等待期间用户可能按了停止/手动启动/重启/退出应用 ——
+        /// 这些操作都会推进 <see cref="_watchdogGeneration"/>(Stop 与非看门狗路径的 <see cref="StartAsync"/>),
+        /// 到点后发现世代号变了就放弃,避免与用户的操作打架。
+        /// </para>
+        /// </summary>
+        private void HandleUnexpectedExit(TimeSpan ranFor, Process process)
+        {
+            // 崩溃当刻的留证与启动失败同一套(输出开头/依赖快照),但不触发 StartFailed ——
+            // 那个弹窗是给"没启动起来"的;运行中崩溃由下面的事件(通知/看门狗)接管
+            this.TryRecordExit(process, "Pi Web 意外退出");
+
+            this.UnexpectedExit?.Invoke(ranFor);
+
+            var settings = SettingsService.Instance.Settings;
+            if (WatchdogPolicy.ShouldResetAttempts(ranFor))
+            {
+                this._watchdogRestartsUsed = 0;
+            }
+
+            if (!settings.AutoRestartOnCrash || this._stopRequestedByUser)
+            {
+                return;
+            }
+
+            if (this._watchdogRestartsUsed >= WatchdogPolicy.MaxRestarts)
+            {
+                this.ReportWatchdogGaveUp();
+                return;
+            }
+
+            var attempt = ++this._watchdogRestartsUsed;
+            var delay = WatchdogPolicy.DelayFor(attempt);
+            var generation = this._watchdogGeneration;
+            this.AppendSystemLog($"[看门狗] 服务意外退出(本次运行 {(int)ranFor.TotalMinutes} 分 {ranFor.Seconds:00} 秒),"
+                + $"{delay.TotalSeconds:0} 秒后自动重启(第 {attempt}/{WatchdogPolicy.MaxRestarts} 次)");
+            this.AutoRestartScheduled?.Invoke(attempt, WatchdogPolicy.MaxRestarts, delay);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(delay);
+
+                    // 延迟期间用户的任何手动启停都会推进世代号;服务已在跑(手动启动成功)也不必再重启
+                    if (generation != this._watchdogGeneration || this._stopRequestedByUser || this.IsRunning)
+                    {
+                        this.AppendSystemLog("[看门狗] 自动重启已取消(期间有手动操作)");
+                        return;
+                    }
+
+                    this.AppendSystemLog("[看门狗] 正在自动重启服务…");
+                    var ok = await this.StartAsync(watchdogRestart: true);
+                    this.AppendSystemLog(ok
+                        ? "[看门狗] 服务已自动重启"
+                        : "[看门狗] 自动重启失败,详情见上方日志");
+                }
+                catch (Exception ex)
+                {
+                    AppLogService.Write($"[看门狗] 自动重启异常: {ex.GetType().Name}: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>看门狗放弃(连续重启次数用尽)的收尾:写日志并通知。</summary>
+        private void ReportWatchdogGaveUp()
+        {
+            this.AppendSystemLog($"[看门狗] 已连续自动重启 {WatchdogPolicy.MaxRestarts} 次仍退出,不再重试,请查看日志排查原因");
+            this.AutoRestartGaveUp?.Invoke(WatchdogPolicy.MaxRestarts);
+        }
+
+        /// <summary>
+        /// 记录一次非用户主动退出的当刻状态并留证(启动失败与中途崩溃共用)。
         /// <para>
         /// 为什么单独留证:界面上的日志面板有长度上限、只保留尾部,而这里最需要的是**开头**
         /// (第一处报错)与当时的运行参数。两者一起写进 app.log,事后还能复盘。
         /// </para>
+        /// <para>每次退出只记录一次:探测窗口路径与退出回调路径可能并发触发。</para>
         /// </summary>
-        private bool TryRecordStartFailure(Process process)
+        private bool TryRecordExit(Process process, string snapshotLabel)
         {
             if (this._startFailureHandled)
             {
@@ -726,7 +856,17 @@ namespace PiWeb_Launcher.Services
 
             // 留证:把 pi-web 全局包目录、pi agent 目录、扩展安装位当刻的状态写进 app.log。
             // 面板里的输出有长度上限只留尾部,而"某个包半装/被占用"这类问题必须当场看清。
-            StartFailureDiagnostics.WriteDependencySnapshot("Pi Web 启动失败", this._lastShimPath);
+            StartFailureDiagnostics.WriteDependencySnapshot(snapshotLabel, this._lastShimPath);
+            return true;
+        }
+
+        /// <summary>观察期内退出(启动失败):留证并通知界面弹一次提示(失败原因已写进 LastStartError)。</summary>
+        private bool TryRecordStartFailure(Process process)
+        {
+            if (!this.TryRecordExit(process, "Pi Web 启动失败"))
+            {
+                return false;
+            }
 
             // 通知界面弹一次提示(失败原因已经写进 LastStartError)
             StartFailed?.Invoke();
@@ -758,6 +898,11 @@ namespace PiWeb_Launcher.Services
             }
 
             this._stopRequestedByUser = true;
+
+            // 用户主动停止:取消任何挂着的看门狗重启,并把重启计数归零(下次意外退出从头计)
+            this._watchdogGeneration++;
+            this._watchdogRestartsUsed = 0;
+
             this.AppendLog("[服务] 正在停止…\r\n");
 
             try

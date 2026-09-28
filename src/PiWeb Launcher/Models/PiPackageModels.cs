@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Text;
+using PiWeb_Launcher.Services;
 
 namespace PiWeb_Launcher.Models
 {
@@ -320,6 +321,49 @@ namespace PiWeb_Launcher.Models
 
         /// <summary>卸载按钮的文案:待确认时变成「确认卸载」。</summary>
         public string UninstallText => this._isPendingUninstall ? "确认卸载" : "卸载";
+
+        private string? _latestVersion;
+
+        /// <summary>
+        /// registry 上的最新版本(「检查更新」后回填);未检查、查不到或非 npm 来源为 null。
+        /// <para>
+        /// ⚠ 必须实现变更通知(与 <see cref="IsPendingUninstall"/> 同一理由):检查更新是
+        /// 在列表显示之后**异步**回填的,不通知界面,行内的「可更新」徽标就不会出现。
+        /// </para>
+        /// </summary>
+        public string? LatestVersion
+        {
+            get => this._latestVersion;
+            set
+            {
+                if (string.Equals(this._latestVersion, value, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                this._latestVersion = value;
+                this.PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(this.LatestVersion)));
+                this.PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(this.IsUpdateAvailable)));
+                this.PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(this.CanUpdate)));
+                this.PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(this.UpdateBadgeText)));
+            }
+        }
+
+        /// <summary>
+        /// registry 最新版是否比已装版本更新(判定规则见 <see cref="PiPackageService.IsUpdateNeeded"/>)。
+        /// 仅 npm 来源参与:git/本地源的包没有 registry 版本,谈不上"有更新"。
+        /// </summary>
+        public bool IsUpdateAvailable =>
+            this.Kind == PackageSourceKind.Npm
+            && this.Version is { Length: > 0 }
+            && this.LatestVersion is { Length: > 0 }
+            && PiPackageService.IsUpdateNeeded(this.Version, this.LatestVersion);
+
+        /// <summary>能否由启动器更新:npm 来源 + registry 上确实查到了更新的版本。</summary>
+        public bool CanUpdate => this.Kind == PackageSourceKind.Npm && this.IsUpdateAvailable;
+
+        /// <summary>行内「可更新到 vX」徽标文案;无更新时空串(徽标隐藏)。</summary>
+        public string UpdateBadgeText => this.IsUpdateAvailable ? $"可更新到 v{this.LatestVersion}" : string.Empty;
     }
 
     /// <summary>pi 包的来源种类。</summary>

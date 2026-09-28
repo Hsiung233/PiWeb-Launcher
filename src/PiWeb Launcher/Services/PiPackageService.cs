@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PiWeb_Launcher.Models;
@@ -23,7 +24,7 @@ namespace PiWeb_Launcher.Services
     /// </list>
     /// </para>
     /// </summary>
-    public sealed class PiPackageService
+    public sealed partial class PiPackageService
     {
         public static PiPackageService Instance { get; } = new();
 
@@ -566,6 +567,90 @@ namespace PiWeb_Launcher.Services
             {
                 this.SetBusy(false);
             }
+        }
+
+        // ---- 更新检测 ----
+
+        /// <summary>判定是否需要更新。internal 供单元测试。</summary>
+        internal static bool IsUpdateNeeded(string? installedVersion, string? latestVersion)
+        {
+            if (string.IsNullOrWhiteSpace(installedVersion) || string.IsNullOrWhiteSpace(latestVersion))
+            {
+                return false;
+            }
+
+            // 比较规则与 pi-web 的版本比较同一套(逐段按数字比、预发布 < 正式);
+            // 形态怪异的版本号比不出大小就按"无更新"处理 —— 宁可少提示,也不误报
+            return PiWebService.CompareVersions(latestVersion.Trim(), installedVersion.Trim()) > 0;
+        }
+
+        /// <summary>
+        /// 解析 <c>npm view &lt;pkg&gt; version</c> 的输出:取最后一条非空行、剥掉引号;
+        /// 空输出(查询失败)返回 null。npm 偶尔会在版本号前后夹告警行或引号,这里一并消化。
+        /// </summary>
+        internal static string? ParseLatestVersionOutput(string stdout)
+        {
+            var line = stdout
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(item => item.Trim())
+                .LastOrDefault(item => item.Length > 0);
+            if (line is null)
+            {
+                return null;
+            }
+
+            line = line.Trim('"').Trim();
+            return line.Length > 0 && VersionLineRegex().IsMatch(line) ? line : null;
+        }
+
+        /// <summary>
+        /// 版本号行须整个长得像版本号。为什么要校验:npm 的告警/错误行可能混进输出
+        /// (网络抖动、registry 瞬断、代理失败),而解析取的是"最后一条非空行" ——
+        /// 不设防的话,一行错误文本(比如以数字开头的 <c>404 …</c>)会被当成"更新版本",
+        /// 界面凭空亮出「可更新」徽标。不像版本号的一律当"查询失败"(null = 无更新):
+        /// 宁可漏报一次,也不误报。
+        /// </summary>
+        [GeneratedRegex(@"^v?\d+(\.\d+)*(?:-[0-9A-Za-z.\-]+)?(?:\+[0-9A-Za-z.\-]+)?$")]
+        private static partial Regex VersionLineRegex();
+
+        /// <summary>
+        /// 逐个查询一批 npm 包在 registry 上的最新版本(顺序执行,不并发轰炸源站)。
+        /// 查不到(404 / 离线 / 超时)记 null,调用方按"无更新"处理;
+        /// git/本地源的包没有 registry 版本可查,调用方不应把它们传进来。
+        /// </summary>
+        /// <param name="onProgress">每查完一个回调一次(已完成数,总数),界面用它显示进度。</param>
+        public async Task<Dictionary<string, string?>> FetchLatestVersionsAsync(
+            IEnumerable<string> packageNames,
+            Action<int, int>? onProgress = null)
+        {
+            var results = new Dictionary<string, string?>(StringComparer.Ordinal);
+            var names = packageNames
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            var index = 0;
+            foreach (var name in names)
+            {
+                index++;
+                string? latest = null;
+                try
+                {
+                    var result = await ChildProcessRunner.CaptureAsync(
+                        $"npm view {PlatformProcess.Quote(name)} version").ConfigureAwait(true);
+                    latest = result.ExitCode == 0 ? ParseLatestVersionOutput(result.Stdout) : null;
+                }
+                catch (Exception)
+                {
+                    // npm 不在 PATH/进程起不来等:这一个包查不到,不影响其余的
+                    latest = null;
+                }
+
+                results[name] = latest;
+                onProgress?.Invoke(index, names.Count);
+            }
+
+            return results;
         }
 
         /// <summary>
