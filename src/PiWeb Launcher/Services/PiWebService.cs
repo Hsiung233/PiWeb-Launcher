@@ -72,6 +72,9 @@ namespace PiWeb_Launcher.Services
         private bool _startFailureHandled;
         private volatile bool _readyReported;
 
+        /// <summary>是否已有一次 <see cref="StartAsync"/> 在途(见 <see cref="IsStartInFlight"/>)。</summary>
+        private volatile bool _startInFlight;
+
         /// <summary>最近一次启动实际使用的参数(错误信息中展示,便于用户复现)。</summary>
         private string _lastRunArgs = BaseRunArgs;
 
@@ -107,6 +110,14 @@ namespace PiWeb_Launcher.Services
 
         /// <summary>服务是否正在运行。</summary>
         public bool IsRunning => IsAlive(this._process);
+
+        /// <summary>
+        /// 是否已有一次启动在途:<see cref="StartAsync"/> 从被调用到进程真正挂到
+        /// <see cref="_process"/> 之间要先起子进程定位 pi-web 命令(数百毫秒),
+        /// 这段时间 <see cref="IsRunning"/> 仍是 false。调用方(托盘菜单/首页按钮/自启动)
+        /// 若不避开这个窗口,连点或与自启动并发会拉起两个服务进程抢同一个端口。
+        /// </summary>
+        public bool IsStartInFlight => this._startInFlight;
 
         /// <summary>已安装的 pi-web 版本;未安装/查询失败为 null。</summary>
         public string? InstalledVersion { get; private set; }
@@ -538,27 +549,42 @@ namespace PiWeb_Launcher.Services
                 : string.CompareOrdinal(left.Pre, right.Pre);
         }
 
-        /// <summary>启动 Pi Web 服务。返回是否成功进入运行状态。</summary>
+        /// <summary>
+        /// 启动 Pi Web 服务。返回是否成功进入运行状态(或已在运行/已有启动在途)。
+        /// <para>
+        /// 可重入:已在运行时直接返回 true;已有一次启动在途时同样返回 true,
+        /// 由在途的那次启动完成实际工作 —— 否则 <see cref="IsStartInFlight"/> 窗口期内
+        /// 的并发调用(托盘连点、自启动与手动点击撞车)会拉起两个服务进程。
+        /// </para>
+        /// </summary>
         public async Task<bool> StartAsync()
         {
-            if (this.IsRunning)
+            if (this.IsRunning || this._startInFlight)
             {
                 return true;
             }
 
-            if (this.InstalledVersion is null)
+            this._startInFlight = true;
+            try
             {
-                await this.GetInstalledVersionAsync();
-            }
+                if (this.InstalledVersion is null)
+                {
+                    await this.GetInstalledVersionAsync();
+                }
 
-            if (this.InstalledVersion is null)
+                if (this.InstalledVersion is null)
+                {
+                    this.LastStartError = $"未安装 {PiCli.PiWebPackageName}。请先点击「安装」。";
+                    this.AppendLog($"[启动失败] {this.LastStartError}\r\n");
+                    return false;
+                }
+
+                return await StartOnceAsync();
+            }
+            finally
             {
-                this.LastStartError = $"未安装 {PiCli.PiWebPackageName}。请先点击「安装」。";
-                this.AppendLog($"[启动失败] {this.LastStartError}\r\n");
-                return false;
+                this._startInFlight = false;
             }
-
-            return await StartOnceAsync();
         }
 
         private async Task<bool> StartOnceAsync()

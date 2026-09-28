@@ -281,13 +281,21 @@ public partial class App : Application
             _tray.MainWindowRequested += ShowMainWindow;
             _tray.WebViewOpenRequested += OnTrayWebViewOpen;
             _tray.BrowserOpenRequested += OnTrayBrowserOpen;
+            _tray.ServiceStartRequested += OnTrayServiceStart;
+            _tray.ServiceStopRequested += OnTrayServiceStop;
+            _tray.ServiceRestartRequested += OnTrayServiceRestart;
             _tray.SingleClickRequested += OnTraySingleClick;
             _tray.DoubleClickRequested += OnTrayDoubleClick;
             _tray.ExitRequested += ExitApplication;
             UpdateTrayDoubleClickDetection();
 
-            // 设置变化时同步双击检测开关
+            // 按当前服务运行状态初始化菜单(启动前只显示“启动服务”);
+            // 之后由 StateChanged 持续同步(自动启动服务拉起进程时菜单随之切换)
+            UpdateTrayServiceMenuState();
+
+            // 设置变化时同步双击检测开关;服务状态变化时同步服务菜单项可见性
             SettingsService.Instance.SettingsChanged += OnSettingsChanged;
+            PiWebService.Instance.StateChanged += OnServiceStateChanged;
         }
     }
 
@@ -326,6 +334,103 @@ public partial class App : Application
     private void OnTrayBrowserOpen()
     {
         OpenByAction(WebOpenAction.Browser);
+    }
+
+    // ---- 托盘菜单服务控制(启动/停止/重启) ----
+
+    /// <summary>Pi Web 服务运行状态变化:同步托盘菜单“启动/停止/重启”的可见性。</summary>
+    private void OnServiceStateChanged()
+    {
+        // StateChanged 可能在后台线程触发(进程退出回调、后台线程的 Stop),
+        // 菜单项是 UI 对象,必须调度到 UI 线程再改可见性
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+        {
+            UpdateTrayServiceMenuState();
+        }
+        else
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(UpdateTrayServiceMenuState);
+        }
+    }
+
+    private void UpdateTrayServiceMenuState()
+    {
+        _tray?.UpdateServiceMenuState(PiWebService.Instance.IsRunning);
+    }
+
+    /// <summary>
+    /// 托盘菜单“启动服务”:与首页“运行”按钮同走 <see cref="PiWebService.StartAsync"/>。
+    /// 失败时把主界面带出来 —— 失败原因只写在首页日志面板里,主界面隐藏时用户什么都看不到。
+    /// </summary>
+    private async void OnTrayServiceStart()
+    {
+        var service = PiWebService.Instance;
+        if (service.IsRunning)
+        {
+            return;
+        }
+
+        // 安装/更新或一次启动还在途时不要叠加启动请求(StartAsync 自身也会拦,这里提前拦截省一次空跑)
+        if (service.IsInstalling || service.IsStartInFlight)
+        {
+            AppLogService.Write("[托盘] 启动/安装已在进行中,忽略本次“启动服务”请求");
+            return;
+        }
+
+        AppLogService.Write("[托盘] 启动 Pi Web 服务");
+        try
+        {
+            if (!await service.StartAsync())
+            {
+                AppLogService.Write($"[托盘] 启动 Pi Web 服务失败: {service.LastStartError}");
+                ShowMainWindow();
+            }
+        }
+        catch (Exception ex)
+        {
+            // 托盘路径上不能让异常拖垮常驻进程;原因同样写进日志供排查
+            AppLogService.Write($"[托盘] 启动 Pi Web 服务异常: {ex.Message}");
+            ShowMainWindow();
+        }
+    }
+
+    /// <summary>
+    /// 托盘菜单“停止服务”:与首页“停止”按钮同走 <see cref="PiWebService.Stop"/>;
+    /// Stop 是幂等的(无进程时空转),菜单开着时服务恰好退出的竞态下重复调用无副作用。
+    /// </summary>
+    private void OnTrayServiceStop()
+    {
+        AppLogService.Write("[托盘] 停止 Pi Web 服务");
+        PiWebService.Instance.Stop();
+    }
+
+    /// <summary>
+    /// 托盘菜单“重启服务”:与首页“重启”按钮同走 <see cref="PiWebService.RestartAsync"/>;
+    /// 失败处理与“启动服务”一致(带出主界面看原因)。
+    /// </summary>
+    private async void OnTrayServiceRestart()
+    {
+        var service = PiWebService.Instance;
+        if (service.IsInstalling || service.IsStartInFlight)
+        {
+            AppLogService.Write("[托盘] 启动/安装已在进行中,忽略本次“重启服务”请求");
+            return;
+        }
+
+        AppLogService.Write("[托盘] 重启 Pi Web 服务");
+        try
+        {
+            if (!await service.RestartAsync())
+            {
+                AppLogService.Write($"[托盘] 重启 Pi Web 服务失败: {service.LastStartError}");
+                ShowMainWindow();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogService.Write($"[托盘] 重启 Pi Web 服务异常: {ex.Message}");
+            ShowMainWindow();
+        }
     }
 
     /// <summary>
