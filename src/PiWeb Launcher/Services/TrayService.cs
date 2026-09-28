@@ -23,11 +23,14 @@ namespace PiWeb_Launcher.Services
         private DispatcherTimer? _singleClickTimer;
         private int _lastDoubleClickTickCount = Environment.TickCount;
 
-        // 服务控制菜单项:三个常驻菜单,按服务运行状态切换可见性(见 UpdateServiceMenuState),
+        // 服务相关菜单项:按服务运行状态切换可见性(见 UpdateServiceMenuState),
         // 状态由 App 在 PiWebService.StateChanged 时同步进来 —— 本类不直接依赖 PiWebService。
+        // 服务未运行时隐藏"停止/重启/WebView中打开/浏览器中打开",只显示"启动服务"。
         private NativeMenuItem? _serviceStartItem;
         private NativeMenuItem? _serviceStopItem;
         private NativeMenuItem? _serviceRestartItem;
+        private NativeMenuItem? _webOpenItem;
+        private NativeMenuItem? _browserOpenItem;
 
         public event Action? SingleClickRequested;
         public event Action? DoubleClickRequested;
@@ -35,10 +38,10 @@ namespace PiWeb_Launcher.Services
         /// <summary>托盘右键菜单“打开界面”。</summary>
         public event Action? MainWindowRequested;
 
-        /// <summary>托盘右键菜单“WebView中打开”。</summary>
+        /// <summary>托盘右键菜单“WebView中打开”(仅服务运行时显示)。</summary>
         public event Action? WebViewOpenRequested;
 
-        /// <summary>托盘右键菜单“浏览器中打开”。</summary>
+        /// <summary>托盘右键菜单“浏览器中打开”(仅服务运行时显示)。</summary>
         public event Action? BrowserOpenRequested;
 
         public event Action? ExitRequested;
@@ -104,8 +107,15 @@ namespace PiWeb_Launcher.Services
         {
             var menu = new NativeMenu();
             menu.Items.Add(CreateItem("打开界面", () => MainWindowRequested?.Invoke()));
-            menu.Items.Add(CreateItem("WebView中打开", () => WebViewOpenRequested?.Invoke()));
-            menu.Items.Add(CreateItem("浏览器中打开", () => BrowserOpenRequested?.Invoke()));
+
+            // “WebView中打开/浏览器中打开”依赖运行中的 pi-web 提供地址:
+            // 先按“未运行”初始化(隐藏),App 接线完成后会立刻按实际运行状态校正
+            _webOpenItem = CreateItem("WebView中打开", () => WebViewOpenRequested?.Invoke());
+            _browserOpenItem = CreateItem("浏览器中打开", () => BrowserOpenRequested?.Invoke());
+            _webOpenItem.IsVisible = false;
+            _browserOpenItem.IsVisible = false;
+            menu.Items.Add(_webOpenItem);
+            menu.Items.Add(_browserOpenItem);
             menu.Items.Add(new NativeMenuItemSeparator());
 
             // 服务控制:先按“未运行”初始化(只显示“启动服务”),
@@ -125,8 +135,8 @@ namespace PiWeb_Launcher.Services
         }
 
         /// <summary>
-        /// 按服务运行状态切换服务控制项的可见性:运行中显示“停止服务/重启服务”,
-        /// 未运行时只显示“启动服务”。
+        /// 按服务运行状态切换相关菜单项的可见性:运行中显示“WebView中打开/浏览器中打开/
+        /// 停止服务/重启服务”,未运行时只显示“启动服务”(与首页“运行中才显示打开按钮”一致)。
         /// <para>
         /// Avalonia 12 的托盘菜单在每次右键时按当前 <see cref="NativeMenuItem.IsVisible"/>
         /// 重建弹层(见 TrayIconImpl.OnRightClicked),因此这里改完,下次打开菜单即生效;
@@ -148,6 +158,17 @@ namespace PiWeb_Launcher.Services
             if (_serviceRestartItem is not null)
             {
                 _serviceRestartItem.IsVisible = isRunning;
+            }
+
+            // 服务没启动时没有可打开的 Web 端,两个打开入口一并隐藏
+            if (_webOpenItem is not null)
+            {
+                _webOpenItem.IsVisible = isRunning;
+            }
+
+            if (_browserOpenItem is not null)
+            {
+                _browserOpenItem.IsVisible = isRunning;
             }
         }
 
