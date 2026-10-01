@@ -1,7 +1,9 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    把 PiWeb Launcher 发布到 bin\Publish(供 Build-Installer.ps1 打包)。.DESCRIPTION
+    把 PiWeb Launcher 发布到 bin\Publish,产出可打包的应用文件(exe 与依赖)。
+
+.DESCRIPTION
     使用 Properties\PublishProfiles 下的发布配置(默认 win_x64,框架依赖版)。
     实际输出目录从 .pubxml 的 <PublishDir> 读出,以保证与 installer.iss 的 MyPublishDir 一致。
 

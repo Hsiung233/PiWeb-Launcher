@@ -1,12 +1,14 @@
 ; PiWeb Launcher 安装包脚本(Inno Setup 7,兼容 6)
 ;
-; ⚠ 本脚本在 tools\BuildSetup\ 下,而**产物落在仓库根的 setup\ 里**(见下面的 OutputDir)。
-;   这么分是有意的:setup\ 只放"给人拿走的东西"(安装包),脚本与语言文件属于构建资料。
+; ⚠ 本脚本在 tools\BuildSetup\ 下,而**产物落在仓库根的 build\ 里**(见下面的 OutputDir)。
+;   这么分是有意的:build\ 只放"给人拿走的东西"(安装包、便携版 zip),脚本与语言文件属于构建资料。
 ;
 ; 使用前先发布应用:
 ;   dotnet publish "src\PiWeb Launcher\PiWeb Launcher.csproj" -p:PublishProfile="win_x64" -c Release
 ; 然后用 Inno Setup Compiler 打开本脚本编译(或跑 ..\..\Build-Installer.ps1),
-; 产物是 setup\PiWebLauncher-Setup-x64.exe。
+; 产物是 build\PiWebLauncher-Setup-Win-x64.exe。
+; 便携版 build\PiWebLauncher-Portable-Win-x64.zip 由 ..\..\Build-Portable.ps1 压缩发布目录得出,
+; 不经过本脚本。
 ; 安装程序会检测 .NET 10 Desktop Runtime,缺失时引导用户到官网下载。
 ;
 ; ⚠ 下面所有相对路径都是相对**本文件所在目录**(Inno 内部称 SourceDir)解析的,
@@ -45,12 +47,12 @@ DefaultDirName={autopf}\{#MyAppNameNoSpace}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; ⚠ 相对路径的 OutputDir 是相对【脚本所在目录】(Inno 内部称 SourceDir)解析的。
-; 产物要落在仓库根的 setup\(而不是脚本旁边),所以这里显式退两层 ——
+; 产物要落在仓库根的 build\(而不是脚本旁边),所以这里显式退两层 ——
 ; 换成绝对路径就得写死机器上的目录,仓库里不能那么干。
-; ⚠ 该目录**不进版本库**(见 .gitignore 的 /setup/*.exe),所以全新克隆里它不存在,
+; ⚠ 该目录**不进版本库**(见 .gitignore 的 /build),所以全新克隆里它不存在,
 ; 由 ISCC 自己创建;跑 ..\..\Build-Installer.ps1 也保证它先存在。
-OutputDir=..\..\setup
-OutputBaseFilename={#MyAppNameNoSpace}-Setup-x64
+OutputDir=..\..\build
+OutputBaseFilename={#MyAppNameNoSpace}-Setup-Win-x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    编译 tools\BuildSetup\installer.iss,产物落在仓库根的 setup\PiWebLauncher-Setup-x64.exe。
+    编译 tools\BuildSetup\installer.iss,产物落在仓库根的 build\PiWebLauncher-Setup-Win-x64.exe。
 
 .DESCRIPTION
     默认先把应用发布一遍(调用根目录的 Build-Publish.ps1),再用 Inno Setup 的命令行编译器 ISCC
@@ -12,7 +12,7 @@
     MyPublishDir 指向的目录里没有 MyAppExeName,脚本会在调 ISCC 之前就报错并提示改哪一处。
 
     ⚠ .iss 里的相对路径全部相对**脚本所在目录**(tools\BuildSetup\)解析,不是仓库根 ——
-    这是 Inno 的规则。输出目录因此写成 `..\..\setup`,由本脚本负责先建好它。
+    这是 Inno 的规则。输出目录因此写成 `..\..\build`,由本脚本负责先建好它。
 
     ISCC.exe 的查找顺序:-ISCC 参数 → PATH → 卸载信息注册表 → 常见安装位置
     (Program Files / Program Files (x86) / %LOCALAPPDATA%\Programs 下的 Inno Setup 6/7)。
@@ -153,7 +153,7 @@ $sourceDir = if ([IO.Path]::IsPathRooted($myPublishDir)) {
 }
 $sourceDir = $sourceDir.TrimEnd('\')
 
-# OutputDir 同样是相对 .iss 目录("." 表示与脚本同目录,本项目里写的是 "..\..\setup")
+# OutputDir 同样是相对 .iss 目录("." 表示与脚本同目录,本项目里写的是 "..\..\build")
 $outputDir = Get-IssDirective -Text $issText -Name 'OutputDir'
 if (-not $outputDir -or $outputDir -eq '.') {
     $installerDir = $setupSourceDir
@@ -164,7 +164,7 @@ if (-not $outputDir -or $outputDir -eq '.') {
 }
 $installerDir = $installerDir.TrimEnd('\')
 
-# 产物目录不进版本库(.gitignore 的 /setup/*.exe),全新克隆里它不存在 ——
+# 产物目录不进版本库(.gitignore 的 /build),全新克隆里它不存在 ——
 # 自己建好,别让 ISCC 或后面的校验因为"目录没有"而报一个看不懂的错。
 if (-not (Test-Path -LiteralPath $installerDir)) {
     New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
