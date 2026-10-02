@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    把 PiWeb Launcher 发布到 bin\Publish,产出可打包的应用文件(exe 与依赖)。
+    把 PiWeb Launcher 发布到 build\PiWebLauncher-Binary-Win-x64,产出可打包的应用文件(exe 与依赖)。
 
 .DESCRIPTION
     使用 Properties\PublishProfiles 下的发布配置(默认 win_x64,框架依赖版)。
@@ -57,7 +57,7 @@ $profilePath = Join-Path $projectDir "Properties\PublishProfiles\$PublishProfile
 
 <#
     取 .pubxml 里声明的 PublishDir。相对路径由 MSBuild 按【项目目录】解析
-    (所以 bin\Publish\x 指的是 src\PiWeb Launcher\bin\Publish\x)。
+    (所以 ..\..\build\PiWebLauncher-Binary-Win-x64 指的是仓库根的 build\PiWebLauncher-Binary-Win-x64)。
 #>
 function Get-PublishDirFromProfile {
     param([Parameter(Mandatory)] [string] $Path)
@@ -103,8 +103,8 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
 
 $declaredPublishDir = Get-PublishDirFromProfile -Path $profilePath
 if (-not $declaredPublishDir) {
-    Write-Warning "$PublishProfile.pubxml 未声明 <PublishDir>,按 bin\Publish\$PublishProfile 处理。"
-    $declaredPublishDir = "bin\Publish\$PublishProfile"
+    Write-Warning "$PublishProfile.pubxml 未声明 <PublishDir>,按 ..\..\build\PiWebLauncher-Binary-Win-x64 处理。"
+    $declaredPublishDir = "..\..\build\PiWebLauncher-Binary-Win-x64"
 }
 $publishDir = Resolve-PublishDir -ProjectDir $projectDir -RelativeOrAbsolute $declaredPublishDir
 

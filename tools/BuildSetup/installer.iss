@@ -18,7 +18,7 @@
 #define MyAppNameNoSpace "PiWebLauncher"
 #define MyAppPublisher "PiWeb Launcher"
 #define MyAppExeName "PiWeb Launcher.exe"
-#define MyPublishDir "..\..\src\PiWeb Launcher\bin\Publish\win_x64"
+#define MyPublishDir "..\..\build\PiWebLauncher-Binary-Win-x64"
 #define MyAppVersion GetVersionNumbersString(MyPublishDir + "\" + MyAppExeName)
 #if MyAppVersion == ""
 #define MyAppVersion "1.0.0"

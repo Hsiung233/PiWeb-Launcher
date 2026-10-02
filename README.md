@@ -228,7 +228,7 @@ dotnet run --project "tools/IconTool/IconTool.csproj" -- "src/PiWeb Launcher/Ass
 # 便携版：发布 + 压缩 → build\PiWebLauncher-Portable-Win-x64.zip
 .\Build-Portable.ps1
 
-# 只发布（输出到 src\PiWeb Launcher\bin\Publish\win_x64）
+# 只发布（输出到 build\PiWebLauncher-Binary-Win-x64）
 .\Build-Publish.ps1
 ```
 
@@ -254,7 +254,7 @@ dotnet run --project "tools/IconTool/IconTool.csproj" -- "src/PiWeb Launcher/Ass
 > **脚本在哪、产物在哪**：安装包脚本与语言文件在 `tools/BuildSetup/` 下，**产物落在仓库根的 `build/`**。
 > 这么分是有意的 —— `build/` 只放"给人拿走的东西"（安装包、便携版 zip），脚本属于构建资料。
 > ⚠ Inno 里所有相对路径都是相对**脚本所在目录**解析的（不是仓库根），所以 `installer.iss` 的
-> `OutputDir` 写的是 `..\..\build`、`MyPublishDir` 是 `..\..\src\...`；改脚本位置时这些都要跟着退层。
+> `OutputDir` 写的是 `..\..\build`、`MyPublishDir` 是 `..\..\build\PiWebLauncher-Binary-Win-x64`；改脚本位置时这些都要跟着退层。
 > `build/` 不进版本库（见 `.gitignore`），全新克隆里它不存在，由 `Build-Installer.ps1` / ISCC 自己创建。
 
 发布为框架依赖版，两种产物都要求用户机器已装 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)：
@@ -323,10 +323,10 @@ tests/PiWeb Launcher.Tests/       单元测试（MSTest）
 tools/BuildSetup/                 安装包脚本（installer.iss + Languages/；产物输出到根的 build/）
 tools/IconTool/                   图标生成器（把 pi.dev 的官方 favicon 标记渲染成 png/ico，一次性工具）
 tools/TestRunner/                 受限环境下的测试入口（CI 不用它）
-Build-Publish.ps1                 发布到 bin/Publish 的脚本（清空旧产物、结束运行中的实例）
+Build-Publish.ps1                 发布到 build/PiWebLauncher-Binary-Win-x64 的脚本（清空旧产物、结束运行中的实例）
 Build-Installer.ps1               发布 + Inno Setup 编译安装包（只出安装包 exe）
 Build-Portable.ps1                发布/压缩发布目录为便携版 zip（只出压缩包，不依赖 Inno Setup）
-build/                            **打包产物目录**（PiWebLauncher-Setup-Win-x64.exe / PiWebLauncher-Portable-Win-x64.zip；不进版本库，由构建脚本创建）
+build/                            **打包产物目录**（PiWebLauncher-Binary-Win-x64/ 发布目录、PiWebLauncher-Setup-Win-x64.exe / PiWebLauncher-Portable-Win-x64.zip；不进版本库，由构建脚本创建）
 docs/screenshots/                 README 中使用的界面截图
 .github/workflows/build.yml       CI：构建 + 跑测试
 .github/workflows/ci.yml          CI：打 tag 时构建安装包与便携版并发布 Release

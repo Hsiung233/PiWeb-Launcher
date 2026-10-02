@@ -60,7 +60,7 @@ function Get-PublishDirFromProfile {
         Where-Object { $_.InnerText.Trim() } |
         Select-Object -First 1
 
-    if ($null -eq $declared) { return "bin\Publish\win_x64" }
+    if ($null -eq $declared) { return "..\..\build\PiWebLauncher-Binary-Win-x64" }
     return $declared.InnerText.Trim()
 }
 

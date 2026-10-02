@@ -72,7 +72,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}".TrimStart('v')
-          $exe = "src/PiWeb Launcher/bin/Publish/win_x64/PiWeb Launcher.exe"
+          $exe = "build/PiWebLauncher-Binary-Win-x64/PiWeb Launcher.exe"
           if (-not (Test-Path $exe)) { throw "找不到发布产物 $exe(发布步骤未执行?)" }
           $ver = (Get-Item $exe).VersionInfo.FileVersion
           Write-Host "tag=$tag exe=$ver"
